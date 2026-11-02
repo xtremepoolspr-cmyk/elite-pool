@@ -652,6 +652,28 @@ function getCoords(timeout = 8000) {
   });
 }
 
+/** Ubicación precisa (GPS de alta precisión) con la exactitud en metros. */
+function getFix(timeout = 20000) {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve({ err: 'unsupported' });
+    navigator.geolocation.getCurrentPosition(
+      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy }),
+      (e) => resolve({ err: e && e.code === 1 ? 'denied' : 'unavailable' }),
+      { enableHighAccuracy: true, timeout, maximumAge: 0 },
+    );
+  });
+}
+/** Dirección aproximada a partir de coordenadas (OpenStreetMap Nominatim; requiere internet). */
+async function reverseGeocode(lat, lng) {
+  try {
+    const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&accept-language=es&lat=${lat}&lon=${lng}`);
+    if (!r.ok) return null;
+    const a = (await r.json()).address || {};
+    const street = [a.house_number, a.road].filter(Boolean).join(' ') || a.neighbourhood || a.suburb || '';
+    return { address: [street, a.neighbourhood && a.road ? a.neighbourhood : ''].filter(Boolean).join(', '), municipality: a.city || a.town || a.village || a.municipality || a.county || '' };
+  } catch (e) { return null; }
+}
+
 /** Reduce la foto y QUEMA el sello (ANTES/DESPUÉS · fecha · hora · GPS) dentro de la imagen. */
 async function processPhoto(file, kind, coords) {
   const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });

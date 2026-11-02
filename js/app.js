@@ -335,12 +335,15 @@ const CLIENT_F = [
 ];
 const PROP_F = [
   { k: 'address', l: 'Dirección', req: 1 }, { k: 'municipality', l: 'Municipio / zona', ph: 'Caguas, San Juan, Guaynabo, Dorado, Montehiedra…' }, { k: 'gate_code', l: 'Código de portón' },
-  { k: 'access_notes', l: 'Notas de acceso (mascotas, cuarto de bombas)', t: 'area' }, { k: 'lat', l: 'Latitud (opcional)', t: 'number', ph: '18.2341' }, { k: 'lng', l: 'Longitud (opcional)', t: 'number', ph: '-66.0485' },
+  { k: 'access_notes', l: 'Notas de acceso (mascotas, cuarto de bombas)', t: 'area' }, { k: 'gps', t: 'gps' }, { k: 'lat', l: 'Latitud', t: 'number', ph: '18.2341' }, { k: 'lng', l: 'Longitud', t: 'number', ph: '-66.0485' },
 ];
+const NEWCLIENT_PROP_F = [{ k: 'address', l: 'Dirección de la propiedad (opcional)' }, { k: 'municipality', l: 'Municipio / zona', ph: 'Caguas, San Juan, Guaynabo, Dorado…' }, { k: 'gate_code', l: 'Código de portón' }, { k: 'gps', t: 'gps' }, { k: 'lat', l: 'Latitud', t: 'number' }, { k: 'lng', l: 'Longitud', t: 'number' }];
 const WB_F = [{ k: 'name', l: 'Nombre', req: 1, ph: 'Piscina Principal, Jacuzzi, Espejo de Agua' }, { k: 'type', l: 'Tipo', t: 'choice', o: [['Pool', 'Piscina'], ['Jacuzzi', 'Jacuzzi'], ['Commercial', 'Comercial']] }, { k: 'gallons', l: 'Volumen (galones)', t: 'number', req: 1 }];
 const EQ_F = [{ k: 'category', l: 'Categoría', req: 1, ph: 'Bomba, Filtro, Calentador, Clorador salino, Automatización' }, { k: 'brand', l: 'Marca' }, { k: 'model', l: 'Modelo' }, { k: 'serial_number', l: 'Serial' }, { k: 'status', l: 'Estado', t: 'choice', o: [['OK', 'OK'], ['Atención', 'Atención'], ['Averiado', 'Averiado']] }];
 
 function formFieldHtml(f, val) {
+  if (f.t === 'gps') return `<div class="fld"><button type="button" class="btn dark" data-act="useGps">📍 Usar mi ubicación actual</button><div class="muted mt-s" id="gps_msg">Párate frente a la casa y toca el botón: guarda las coordenadas exactas${online() ? ' y propone la dirección' : ''}.</div></div>`;
+  if (f.t === 'hdr') return '<h2>📍 Propiedad y ubicación</h2>';
   if (f.t === 'days') {
     const sel = String(val || '').split(',').filter((x) => x !== '');
     return `<div class="fld"><label>${esc(f.l)}</label><input type="hidden" name="${f.k}" value="${esc(sel.join(','))}"><div class="chips">${DAYS.map((n, i) => `<button type="button" class="chip${sel.includes(String(i)) ? ' on' : ''}" data-act="toggleDay" data-v="${i}">${DAYS_S[i]}</button>`).join('')}</div></div>`;
@@ -357,8 +360,9 @@ function openForm(kind, id, parent) {
   if (kind === 'prop') { const p = id && find('properties', id); v = p ? { ...p } : {}; }
   if (kind === 'wb') { const w = id && find('waterBodies', id); v = w ? { ...w } : { type: 'Pool' }; }
   if (kind === 'equip') { const e = id && find('equipment', id); v = e ? { ...e } : { status: 'OK' }; }
-  UI.form = { kind, id, parent, fields: defs[0] };
-  openSheet(`${id ? 'Editar' : 'Nuevo'} ${defs[1]}`, `<form id="frm" onsubmit="return false">${defs[0].map((f) => formFieldHtml(f, v[f.k])).join('')}${btn('Guardar', 'submitForm')}</form>`);
+  const fields = kind === 'client' && !id ? [...defs[0], { k: '_h', t: 'hdr' }, ...NEWCLIENT_PROP_F] : defs[0];
+  UI.form = { kind, id, parent, fields };
+  openSheet(`${id ? 'Editar' : 'Nuevo'} ${defs[1]}`, `<form id="frm" onsubmit="return false">${fields.map((f) => formFieldHtml(f, v[f.k])).join('')}${btn('Guardar', 'submitForm')}</form>`);
 }
 function submitForm() {
   const F = UI.form, g = (k) => { const el = document.querySelector(`#frm [name="${k}"]`); return el ? el.value.trim() : ''; };
@@ -367,7 +371,11 @@ function submitForm() {
   if (miss) { toast(`Falta: ${miss.l}`); return; }
   if (F.kind === 'client') {
     const old = F.id && find('clients', F.id);
-    upsert('clients', { id: old ? old.id : uid('c'), name: g('name'), phone: g('phone'), email: g('email'), dispatch_channel_pref: g('channel') || 'WHATSAPP', dispatch_format_pref: g('format') || 'TEXT', status: old ? old.status : 'ACTIVE', notes: g('notes'), monthly_fee: toNum(g('monthly_fee')) || 0, tags: g('tags').split(',').map((t) => t.trim()).filter(Boolean), service_days: g('service_days').split(',').filter((x) => x !== '').map(Number).sort() });
+    const cid = old ? old.id : uid('c');
+    upsert('clients', { id: cid, name: g('name'), phone: g('phone'), email: g('email'), dispatch_channel_pref: g('channel') || 'WHATSAPP', dispatch_format_pref: g('format') || 'TEXT', status: old ? old.status : 'ACTIVE', notes: g('notes'), monthly_fee: toNum(g('monthly_fee')) || 0, tags: g('tags').split(',').map((t) => t.trim()).filter(Boolean), service_days: g('service_days').split(',').filter((x) => x !== '').map(Number).sort() });
+    if (!old && (g('address') || g('lat'))) {
+      upsert('properties', { id: uid('p'), client_id: cid, address: g('address') || 'Sin dirección', municipality: g('municipality'), gate_code: g('gate_code'), access_notes: '', lat: toNum(g('lat')) ?? DEPOT.lat, lng: toNum(g('lng')) ?? DEPOT.lng });
+    }
   } else if (F.kind === 'prop') {
     const old = F.id && find('properties', F.id);
     upsert('properties', { id: old ? old.id : uid('p'), client_id: old ? old.client_id : F.parent, address: g('address'), municipality: g('municipality'), gate_code: g('gate_code'), access_notes: g('access_notes'), lat: toNum(g('lat')) ?? DEPOT.lat, lng: toNum(g('lng')) ?? DEPOT.lng });
@@ -649,6 +657,26 @@ function go(type, id) { UI.view = { type, id }; render(); }
    ===================================================================== */
 const A = {
   noop() {},
+  useGps: async () => {
+    const msg = document.getElementById('gps_msg'), set = (t) => { if (msg) msg.textContent = t; };
+    const la = document.querySelector('#frm [name="lat"]'), ln = document.querySelector('#frm [name="lng"]');
+    if (!la || !ln) return;
+    set('Buscando señal GPS… espera unos segundos.');
+    const f = await getFix(20000);
+    if (f.err) return set(f.err === 'denied' ? 'Chrome no tiene permiso de ubicación. Toca el candado junto a la dirección → Permisos → Ubicación → Permitir.' : 'No se pudo obtener la ubicación. Revisa que el GPS del teléfono esté encendido y sal a cielo abierto.');
+    la.value = f.lat.toFixed(6); ln.value = f.lng.toFixed(6);
+    const acc = Math.round(f.acc), weak = acc > 30 ? ' Precisión baja: aléjate de techos o árboles y vuelve a tocar el botón.' : '';
+    set(`✓ Ubicación guardada (precisión ±${acc} m).${weak}`);
+    if (!online()) return;
+    const ad = document.querySelector('#frm [name="address"]'), mu = document.querySelector('#frm [name="municipality"]');
+    const g = await reverseGeocode(f.lat, f.lng);
+    if (g) {
+      let filled = false;
+      if (ad && !ad.value.trim() && g.address) { ad.value = g.address; filled = true; }
+      if (mu && !mu.value.trim() && g.municipality) { mu.value = g.municipality; filled = true; }
+      if (filled) set(`✓ Ubicación guardada (±${acc} m). Dirección sugerida: revísala y corrígela si hace falta.${weak}`);
+    }
+  },
   openPdfSettings: () => go('pdf', 'x'),
   delLogo: () => { S.settings.logo = null; persist(); render(); },
   resetPdf: () => { if (confirm('Se restauran las opciones de PDF (el logo y los datos del negocio se conservan).')) { const d = mergeSettings(null); S.settings.invoice = d.invoice; S.settings.report = d.report; persist(); render(); } },
