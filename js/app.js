@@ -1,11 +1,12 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
+const APP_VERSION = 'v7 · Respaldo';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
 
-const S = { db: null, queue: [], lastSync: null, settings: mergeSettings(null) };
+const S = { db: null, queue: [], lastSync: null, settings: mergeSettings(null), demoPurged: false, lastBackup: null };
 const UI = {
   tab: 'routes', view: null, q: '', clientFilter: 'ACTIVE', orderFilter: 'ALL', shop: { status: 'ALL', tech: 'ALL', client: 'ALL' },
   invFilter: 'ALL', chem: { clientId: '', wbId: '', gal: '', n: 0 }, drafts: {}, form: null, dispatch: null, simOffline: false,
@@ -21,7 +22,7 @@ const idb = () => new Promise((res, rej) => { const r = indexedDB.open('epspr', 
 const idbGet = async (k) => { const d = await idb(); return new Promise((res) => { const q = d.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(undefined); }); };
 const idbSet = async (k, v) => { const d = await idb(); return new Promise((res) => { const t = d.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(); t.onerror = () => res(); }); };
 let persistTimer = null;
-const persist = () => { clearTimeout(persistTimer); persistTimer = setTimeout(() => idbSet('state', { db: S.db, queue: S.queue, lastSync: S.lastSync, settings: S.settings }).catch(() => {}), 300); };
+const persist = () => { clearTimeout(persistTimer); persistTimer = setTimeout(() => idbSet('state', { db: S.db, queue: S.queue, lastSync: S.lastSync, settings: S.settings, demoPurged: S.demoPurged, lastBackup: S.lastBackup }).catch(() => {}), 300); };
 
 /* ---------- mutaciones + cola de sincronización ---------- */
 let renderQueued = false;
@@ -54,6 +55,17 @@ function removeClient(id) {
   db.photos = db.photos.filter((p) => !stops.includes(p.owner_id) && !wos.includes(p.owner_id));
   enqueue({ table: 'clients', op: 'delete', rowId: id, cascade: true });
   changed();
+}
+
+/** Quita los clientes de ejemplo que traían las versiones anteriores (ids c1–c6 con correo example.com) y todo lo suyo. */
+function purgeDemo() {
+  const ids = ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'].filter((id) => { const c = find('clients', id); return c && /example\.com$/i.test(c.email || ''); });
+  if (!ids.length) return;
+  const props = S.db.properties.filter((p) => ids.includes(p.client_id)).map((p) => p.id);
+  const routeIds = [...new Set(S.db.stops.filter((s) => props.includes(s.property_id)).map((s) => s.route_id))];
+  ids.forEach(removeClient);
+  S.db.routes = S.db.routes.filter((r) => !routeIds.includes(r.id) || S.db.stops.some((s) => s.route_id === r.id));
+  S.queue = [];
 }
 
 let syncTimer = null;
@@ -299,7 +311,7 @@ function clientsTab() {
     const wbc = T('waterBodies').filter((w) => props.some((p) => p.id === w.property_id)).length;
     return `<div class="card tap" data-act="openClient" data-id="${c.id}"><div class="row between"><b>${esc(c.name)}</b>${badge(c.status === 'ACTIVE' ? 'Activo' : 'Archivado', c.status === 'ACTIVE' ? COL.ok : COL.pending)}</div>
       ${muted(esc(props.map((p) => p.municipality).filter(Boolean).join(', ') || 'Sin propiedad') + ` · ${wbc} cuerpo(s) de agua · ${money(c.monthly_fee)}/mes`, 'mt-s')}${muted('Envío: ' + esc(prefText(c)))}${muted('Días de servicio: ' + esc(daysText(c)))}</div>`;
-  }).join('') + '</div>' : empty('No hay clientes en esta vista.');
+  }).join('') + '</div>' : empty(T('clients').length ? 'No hay clientes en esta vista.' : 'Aún no tienes clientes. Toca «+ Nuevo» para agregar el primero (puedes usar el GPS estando frente a la casa).');
   return { title: 'Clientes', sub: `${activeClients().length} activos`, right: btn('+ Nuevo', 'newClient', {}, 'sm'), body: h };
 }
 
@@ -527,6 +539,19 @@ function msgRecipients() {
   const a = UI.msg.area.toLowerCase(), di = DAYS.indexOf(UI.msg.area);
   return activeClients().filter((c) => UI.msg.area === 'ALL' || T('properties').some((p) => p.client_id === c.id && p.municipality.toLowerCase() === a) || c.tags.some((t) => t.toLowerCase() === a) || (di >= 0 && (c.service_days || []).includes(di)));
 }
+const backupBlob = () => new Blob([JSON.stringify({ app: 'elite-pool-pwa', format: 1, exported_at: new Date().toISOString(), db: S.db, settings: S.settings })], { type: 'application/json' });
+const backupStale = () => !S.lastBackup || Date.now() - new Date(S.lastBackup).getTime() > 7 * 864e5;
+function markBackup(msg) { S.lastBackup = new Date().toISOString(); persist(); render(); toast(msg); }
+async function restoreBackup(file) {
+  let data;
+  try { data = JSON.parse(await file.text()); } catch (e) { return alert('Ese archivo no es un respaldo válido.'); }
+  if (!data || data.app !== 'elite-pool-pwa' || !data.db || !Array.isArray(data.db.clients)) return alert('Ese archivo no es un respaldo de Elite Pool Service PR.');
+  const n = data.db.clients.length;
+  if (!confirm(`Se reemplazarán TODOS los datos actuales por el respaldo (${n} cliente(s), guardado el ${fmtDateTime(data.exported_at)}). ¿Continuar?`)) return;
+  TABLES.forEach((t) => { if (!Array.isArray(data.db[t])) data.db[t] = []; });
+  S.db = data.db; S.settings = mergeSettings(data.settings); S.queue = []; S.demoPurged = true; UI.drafts = {}; UI.view = null;
+  persist(); render(); toast(`Respaldo restaurado: ${n} cliente(s)`);
+}
 function msgTab() {
   const M = UI.msg, tpl = TEMPLATES.find((t) => t.id === M.tpl);
   if (M.subject === null) { M.subject = tpl.subject; M.body = tpl.body; }
@@ -543,10 +568,14 @@ function msgTab() {
   h += muted('El teléfono abre WhatsApp / Correo con el mensaje listo para cada cliente; hay que tocar «enviar» en cada uno.');
   const log = [...T('dispatchLog')].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 8);
   h += '<h2>Últimos envíos</h2>' + (log.length ? log.map((l) => `<div class="card"><b>${esc(clientName(l.client_id))}</b>${muted(`${{ REPORT: 'Informe', INVOICE: 'Factura', BROADCAST: 'Aviso' }[l.kind]} · ${l.channel} · ${l.format} · ${fmtDateTime(l.at)}`)}</div>`).join('') : empty('Aún no hay envíos registrados.'));
-  h += `<h2>Sistema y sincronización</h2><div class="card"><b style="color:${online() ? COL.ok : COL.warn}">${online() ? '● En línea' : '● Modo offline'}</b>${muted(`${S.queue.length} cambio(s) pendientes · Última sincronización: ${S.lastSync ? fmtDateTime(S.lastSync) : 'nunca'}`)}
+  h += `<h2>💾 Respaldo de datos</h2><div class="card">Tus datos viven solo en este teléfono. Guarda un respaldo seguido (y súbelo a Drive o envíatelo por WhatsApp/correo).
+    <div class="mt-s" style="font-weight:700;color:${backupStale() ? COL.warn : COL.ok}">${S.lastBackup ? 'Último respaldo: ' + fmtDateTime(S.lastBackup) : 'Aún no has hecho ningún respaldo'}</div>
+    <div class="mt-s"></div>${btn('💾 Guardar respaldo en el teléfono', 'backupJson')}<div class="mt-s"></div>${btn('📤 Enviar / guardar en Drive o WhatsApp', 'shareBackup', {}, 'ghost')}<div class="mt-s"></div>${btn('📊 Exportar a Excel (.xlsx)', 'exportXlsx', {}, 'ghost')}
+    ${muted('El archivo .json es el respaldo completo (clientes, historial, fotos, logo) y se puede restaurar. El Excel es para consultar o imprimir: clientes, facturas y lecturas.', 'mt-s')}
+    <div class="mt"></div><label class="btn ghost">♻️ Restaurar desde un respaldo (.json)<input type="file" accept=".json,application/json" hidden data-restore="1"></label></div>
+    <h2>Sistema y sincronización</h2><div class="card"><b style="color:${online() ? COL.ok : COL.warn}">${online() ? '● En línea' : '● Modo offline'}</b>${muted(`${S.queue.length} cambio(s) pendientes · Última sincronización: ${S.lastSync ? fmtDateTime(S.lastSync) : 'nunca'}`)}
     <div class="row between mt"><span>Simular modo sin conexión (prueba)</span><label class="sw"><input type="checkbox" data-sim="1"${UI.simOffline ? ' checked' : ''}><i></i></label></div>
-    <div class="mt"></div>${btn(UI.syncing ? 'Sincronizando…' : 'Sincronizar ahora', 'syncNow', {}, 'ghost')}${UI.installEvt ? '<div class="mt-s"></div>' + btn('📲 Instalar app en este teléfono', 'install', {}, 'dark') : ''}
-    <div class="mt-s"></div>${btn('Restablecer datos de ejemplo', 'resetDemo', {}, 'sm danger')}</div>`;
+    <div class="mt"></div>${btn(UI.syncing ? 'Sincronizando…' : 'Sincronizar ahora', 'syncNow', {}, 'ghost')}${muted('Versión de la app: '+APP_VERSION,'mt-s')}${UI.installEvt ? '<div class="mt-s"></div>' + btn('📲 Instalar app en este teléfono', 'install', {}, 'dark') : ''}</div>`;
   return { title: 'Mensajería', sub: 'Envío híbrido, avisos masivos y sincronización', body: h };
 }
 
@@ -699,7 +728,15 @@ const A = {
   closeSheet,
   install: async () => { const e = UI.installEvt; if (!e) return; e.prompt(); await e.userChoice; UI.installEvt = null; render(); },
   syncNow,
-  resetDemo: () => { if (confirm('Se reemplazarán TODOS los datos locales por los datos de ejemplo.')) { S.db = seedDb(todayISO()); S.queue = []; UI.drafts = {}; changed(); } },
+  backupJson: () => { downloadBlob(backupBlob(), `respaldo-elite-pool-${todayISO()}.json`); markBackup('Respaldo guardado en Descargas'); },
+  shareBackup: async () => {
+    const file = new File([backupBlob()], `respaldo-elite-pool-${todayISO()}.json`, { type: 'application/json' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: 'Respaldo Elite Pool Service PR' }); markBackup('Respaldo enviado'); return; } catch (e) { if (e && e.name === 'AbortError') return; }
+    }
+    downloadBlob(file, file.name); markBackup('Respaldo guardado en Descargas');
+  },
+  exportXlsx: () => { downloadBlob(buildXlsx(backupSheets(S.db)), `clientes-elite-pool-${todayISO()}.xlsx`); toast('Excel guardado en Descargas'); },
   pick: (d, el) => { const seg = el.parentElement; seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === el)); seg.previousElementSibling.value = d.v; },
   submitForm,
 
@@ -912,6 +949,7 @@ async function onChange(e) {
   if (t.dataset.chk) { // checklist de parada u orden
     const tbl = t.dataset.chk === 'stop' ? 'stops' : 'workOrders', row = find(tbl, t.dataset.owner);
     upsert(tbl, { ...row, checklist: row.checklist.map((c) => (c.id === t.dataset.id ? { ...c, done: t.checked } : c)) });
+  } else if (t.dataset.restore && t.files && t.files[0]) { const f = t.files[0]; t.value = ''; restoreBackup(f);
   } else if (t.dataset.set) { setPath(S.settings, t.dataset.set, t.checked); persist(); }
   else if (t.dataset.note) { const row = find('stops', t.dataset.note); if (row) upsert('stops', { ...row, client_note: t.value }); }
   else if (t.dataset.logo && t.files && t.files[0]) {
@@ -957,9 +995,10 @@ async function boot() {
   setupBack();
   try {
     const saved = await idbGet('state');
-    if (saved && saved.db) { S.db = saved.db; S.queue = saved.queue || []; S.lastSync = saved.lastSync || null; S.settings = mergeSettings(saved.settings); TABLES.forEach((t) => { if (!S.db[t]) S.db[t] = []; }); S.db.clients.forEach((c) => { if (!Array.isArray(c.service_days)) c.service_days = SAMPLE_DAYS[c.id] || []; }); }
+    if (saved && saved.db) { S.db = saved.db; S.queue = saved.queue || []; S.lastSync = saved.lastSync || null; S.settings = mergeSettings(saved.settings); S.demoPurged = !!saved.demoPurged; S.lastBackup = saved.lastBackup || null; TABLES.forEach((t) => { if (!S.db[t]) S.db[t] = []; }); S.db.clients.forEach((c) => { if (!Array.isArray(c.service_days)) c.service_days = SAMPLE_DAYS[c.id] || []; }); }
   } catch (e) { /* IndexedDB no disponible: se usan datos de ejemplo en memoria */ }
-  if (!S.db) S.db = seedDb(todayISO());
+  if (!S.db) { S.db = emptyDb(); S.demoPurged = true; }
+  if (!S.demoPurged) { purgeDemo(); S.demoPurged = true; persist(); }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   render(); maybeSync();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

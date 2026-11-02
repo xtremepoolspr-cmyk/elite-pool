@@ -640,6 +640,70 @@ async function runAction(a, client, doc) {
   return 'opened';
 }
 
+
+/* ---------- exportar a Excel (.xlsx) sin librerías: ZIP sin compresión + XML ---------- */
+const CRC_T = (() => { const t = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const crc32 = (u) => { let c = 0xffffffff; for (let i = 0; i < u.length; i++) c = CRC_T[(c ^ u[i]) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+function zipStore(files) {
+  const enc = new TextEncoder(), parts = [], central = []; let off = 0;
+  const d = new Date(), dt = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate(), tm = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+  files.forEach(([name, text]) => {
+    const nb = enc.encode(name), data = enc.encode(text), crc = crc32(data);
+    const lh = new DataView(new ArrayBuffer(30)); [[0, 0x04034b50, 4], [4, 20, 2], [6, 0x0800, 2], [8, 0, 2], [10, tm, 2], [12, dt, 2], [14, crc, 4], [18, data.length, 4], [22, data.length, 4], [26, nb.length, 2], [28, 0, 2]].forEach(([o, v, n]) => (n === 4 ? lh.setUint32(o, v, true) : lh.setUint16(o, v, true)));
+    parts.push(new Uint8Array(lh.buffer), nb, data);
+    const ch = new DataView(new ArrayBuffer(46)); [[0, 0x02014b50, 4], [4, 20, 2], [6, 20, 2], [8, 0x0800, 2], [10, 0, 2], [12, tm, 2], [14, dt, 2], [16, crc, 4], [20, data.length, 4], [24, data.length, 4], [28, nb.length, 2], [30, 0, 2], [32, 0, 2], [34, 0, 2], [36, 0, 2], [38, 0, 4], [42, off, 4]].forEach(([o, v, n]) => (n === 4 ? ch.setUint32(o, v, true) : ch.setUint16(o, v, true)));
+    central.push(new Uint8Array(ch.buffer), nb);
+    off += 30 + nb.length + data.length;
+  });
+  const csize = central.reduce((s, u) => s + u.length, 0), end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true); end.setUint32(12, csize, true); end.setUint32(16, off, true);
+  return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+const xmlEsc = (s) => String(s ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const colName = (i) => { let s = ''; for (i++; i > 0; i = Math.floor((i - 1) / 26)) s = String.fromCharCode(65 + ((i - 1) % 26)) + s; return s; };
+/** sheets: [{ name, rows: [[encabezados], [fila], ...] }] → Blob .xlsx */
+function buildXlsx(sheets) {
+  const sheetXml = (rows) => {
+    const widths = []; rows.forEach((r) => r.forEach((v, i) => { widths[i] = Math.min(60, Math.max(widths[i] || 8, String(v ?? '').length + 2)); }));
+    const body = rows.map((r, ri) => `<row r="${ri + 1}">${r.map((v, ci) => {
+      const ref = colName(ci) + (ri + 1), st = ri === 0 ? ' s="1"' : '';
+      if (v === null || v === undefined || v === '') return '';
+      return typeof v === 'number' && isFinite(v) ? `<c r="${ref}"${st}><v>${v}</v></c>` : `<c r="${ref}"${st} t="inlineStr"><is><t xml:space="preserve">${xmlEsc(v)}</t></is></c>`;
+    }).join('')}</row>`).join('');
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${widths.map((w, i) => `<col min="${i + 1}" max="${i + 1}" width="${w}" customWidth="1"/>`).join('')}</cols><sheetData>${body}</sheetData></worksheet>`;
+  };
+  const safe = (n, i) => xmlEsc(String(n).replace(/[\\/?*\[\]:]/g, ' ').slice(0, 31) || 'Hoja' + (i + 1));
+  const files = [
+    ['[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}</Types>`],
+    ['_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'],
+    ['xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map((s, i) => `<sheet name="${safe(s.name, i)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets></workbook>`],
+    ['xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('')}<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`],
+    ['xl/styles.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0284C7"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>'],
+    ...sheets.map((s, i) => [`xl/worksheets/sheet${i + 1}.xml`, sheetXml(s.rows)]),
+  ];
+  return zipStore(files);
+}
+/** Hojas de Excel con los datos de negocio (clientes, facturas, lecturas). */
+function backupSheets(db) {
+  const DN = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+  const CH = { WHATSAPP: 'WhatsApp', EMAIL: 'Email', BOTH: 'Ambos' }, FM = { PDF: 'PDF', TEXT: 'Texto', BOTH: 'PDF + Texto' };
+  const cname = (id) => (db.clients.find((c) => c.id === id) || {}).name || '';
+  const clientes = [['Nombre', 'Estado', 'Teléfono', 'Email', 'Cuota mensual', 'Días de servicio', 'Canal de envío', 'Formato de envío', 'Dirección', 'Municipio', 'Código de portón', 'Notas de acceso', 'Latitud', 'Longitud', 'Piscinas / cuerpos de agua', 'Etiquetas', 'Notas']];
+  db.clients.forEach((c) => {
+    const props = db.properties.filter((p) => p.client_id === c.id), p = props[0] || {};
+    const wbs = db.waterBodies.filter((w) => props.some((x) => x.id === w.property_id)).map((w) => `${w.name} (${w.gallons} gal)`).join('; ');
+    clientes.push([c.name, c.status === 'ACTIVE' ? 'Activo' : 'Archivado', c.phone, c.email, +c.monthly_fee || 0, (c.service_days || []).map((d) => DN[d]).join(', '), CH[c.dispatch_channel_pref] || '', FM[c.dispatch_format_pref] || '', props.map((x) => x.address).join(' | '), p.municipality || '', p.gate_code || '', p.access_notes || '', p.lat ?? '', p.lng ?? '', wbs, (c.tags || []).join(', '), c.notes || '']);
+  });
+  const facturas = [['Número', 'Cliente', 'Período', 'Vence', 'Total', 'Estado', 'Método de pago']];
+  db.invoices.forEach((i) => facturas.push([invNumber(i, db), cname(i.client_id), i.period, i.due_date, +i.total_amount || 0, STATUS_LABEL[effectiveStatus(i, todayISO())] || i.status, PAYMENT_LABEL[i.payment_method] || i.payment_method]));
+  const lecturas = [['Fecha', 'Cliente', 'Cuerpo de agua', 'Cloro libre', 'pH', 'Alcalinidad', 'Ác. cianúrico', 'Sal', 'Dureza de calcio']];
+  db.readings.forEach((r) => {
+    const w = db.waterBodies.find((x) => x.id === r.water_body_id) || {}, p = db.properties.find((x) => x.id === w.property_id) || {};
+    lecturas.push([(r.created_at || '').slice(0, 10), cname(p.client_id), w.name || '', r.free_chlorine ?? '', r.ph ?? '', r.alkalinity ?? '', r.cyanuric_acid ?? '', r.salt ?? '', r.calcium_hardness ?? '']);
+  });
+  return [{ name: 'Clientes', rows: clientes }, { name: 'Facturas', rows: facturas }, { name: 'Lecturas químicas', rows: lecturas }];
+}
+
 /* ---------- ubicación y fotos con sello ---------- */
 function getCoords(timeout = 8000) {
   return new Promise((resolve) => {
@@ -695,4 +759,4 @@ async function processPhoto(file, kind, coords) {
   return { uri: cv.toDataURL('image/jpeg', 0.72), w, h };
 }
 
-if (typeof module !== 'undefined') module.exports = { athUrl, paymentInstructions, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
+if (typeof module !== 'undefined') module.exports = { athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };

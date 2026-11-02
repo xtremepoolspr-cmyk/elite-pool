@@ -16,16 +16,20 @@ const WORK_ORDER_TEMPLATES = {
 };
 const mkChecklist = (prefix, labels = DEFAULT_CHECKLIST) => labels.map((label, i) => ({ id: `${prefix}_c${i}`, label, done: false }));
 
+const SAMPLE_DAYS = { c1: [1, 4], c2: [2, 5], c3: [1, 3, 5], c4: [3], c5: [2, 4], c6: [] };
 const TABLES = ['clients', 'properties', 'waterBodies', 'equipment', 'routes', 'stops', 'readings', 'dosages', 'workOrders', 'shoppingItems', 'invoices', 'photos', 'dispatchLog'];
+
+/** Base de datos vacía: la app arranca sin clientes de ejemplo. */
+function emptyDb() { const db = {}; TABLES.forEach((t) => { db[t] = []; }); return db; }
 
 function seedDb(today) {
   const clients = [
-    { id: 'c1', name: 'Familia Rivera Colón', phone: '787-555-0101', email: 'rivera@example.com', dispatch_channel_pref: 'WHATSAPP', dispatch_format_pref: 'BOTH', status: 'ACTIVE', notes: 'Prefieren recibir informe después de cada visita.', monthly_fee: 125, tags: ['Caguas', 'Residencial'] },
-    { id: 'c2', name: 'Dra. Marisol Vázquez', phone: '787-555-0102', email: 'mvazquez@example.com', dispatch_channel_pref: 'EMAIL', dispatch_format_pref: 'PDF', status: 'ACTIVE', notes: 'Pagos por ATH Móvil los primeros 5 días del mes.', monthly_fee: 150, tags: ['Guaynabo', 'Residencial'] },
-    { id: 'c3', name: 'Condominio Vista Dorada', phone: '787-555-0103', email: 'admin@vistadorada.example.com', dispatch_channel_pref: 'BOTH', dispatch_format_pref: 'BOTH', status: 'ACTIVE', notes: 'Coordinar con administración; registrar en bitácora.', monthly_fee: 480, tags: ['Dorado', 'Comercial'] },
-    { id: 'c4', name: 'Carlos Ortiz Pagán', phone: '787-555-0104', email: 'cortiz@example.com', dispatch_channel_pref: 'WHATSAPP', dispatch_format_pref: 'TEXT', status: 'ACTIVE', notes: '', monthly_fee: 110, tags: ['Montehiedra', 'Residencial'] },
-    { id: 'c5', name: 'Residencia Santiago-Meléndez', phone: '939-555-0105', email: 'santiago.melendez@example.com', dispatch_channel_pref: 'BOTH', dispatch_format_pref: 'BOTH', status: 'ACTIVE', notes: 'Piscina, jacuzzi y espejo de agua.', monthly_fee: 175, tags: ['San Juan', 'Residencial'] },
-    { id: 'c6', name: 'Ana Lugo Torres', phone: '787-555-0106', email: 'alugo@example.com', dispatch_channel_pref: 'EMAIL', dispatch_format_pref: 'TEXT', status: 'ARCHIVED', notes: 'Pausó el servicio (se mudó).', monthly_fee: 100, tags: ['Caguas'] },
+    { id: 'c1', service_days: [1, 4], name: 'Familia Rivera Colón', phone: '787-555-0101', email: 'rivera@example.com', dispatch_channel_pref: 'WHATSAPP', dispatch_format_pref: 'BOTH', status: 'ACTIVE', notes: 'Prefieren recibir informe después de cada visita.', monthly_fee: 125, tags: ['Caguas', 'Residencial'] },
+    { id: 'c2', service_days: [2, 5], name: 'Dra. Marisol Vázquez', phone: '787-555-0102', email: 'mvazquez@example.com', dispatch_channel_pref: 'EMAIL', dispatch_format_pref: 'PDF', status: 'ACTIVE', notes: 'Pagos por ATH Móvil los primeros 5 días del mes.', monthly_fee: 150, tags: ['Guaynabo', 'Residencial'] },
+    { id: 'c3', service_days: [1, 3, 5], name: 'Condominio Vista Dorada', phone: '787-555-0103', email: 'admin@vistadorada.example.com', dispatch_channel_pref: 'BOTH', dispatch_format_pref: 'BOTH', status: 'ACTIVE', notes: 'Coordinar con administración; registrar en bitácora.', monthly_fee: 480, tags: ['Dorado', 'Comercial'] },
+    { id: 'c4', service_days: [3], name: 'Carlos Ortiz Pagán', phone: '787-555-0104', email: 'cortiz@example.com', dispatch_channel_pref: 'WHATSAPP', dispatch_format_pref: 'TEXT', status: 'ACTIVE', notes: '', monthly_fee: 110, tags: ['Montehiedra', 'Residencial'] },
+    { id: 'c5', service_days: [2, 4], name: 'Residencia Santiago-Meléndez', phone: '939-555-0105', email: 'santiago.melendez@example.com', dispatch_channel_pref: 'BOTH', dispatch_format_pref: 'BOTH', status: 'ACTIVE', notes: 'Piscina, jacuzzi y espejo de agua.', monthly_fee: 175, tags: ['San Juan', 'Residencial'] },
+    { id: 'c6', service_days: [], name: 'Ana Lugo Torres', phone: '787-555-0106', email: 'alugo@example.com', dispatch_channel_pref: 'EMAIL', dispatch_format_pref: 'TEXT', status: 'ARCHIVED', notes: 'Pausó el servicio (se mudó).', monthly_fee: 100, tags: ['Caguas'] },
   ];
   const properties = [
     { id: 'p1', client_id: 'c1', address: 'Urb. Villa Blanca, Calle Esmeralda 24', municipality: 'Caguas', gate_code: '#4821', access_notes: 'Perro pequeño en el patio. Cuarto de bombas junto a la marquesina.', lat: 18.2383, lng: -66.0352 },
