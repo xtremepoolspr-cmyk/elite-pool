@@ -1,12 +1,12 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v9 · Equipo editable';
+const APP_VERSION = 'v10 · Clave de acceso';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
 
-const S = { db: null, queue: [], lastSync: null, settings: mergeSettings(null), demoPurged: false, lastBackup: null };
+const S = { lock: null, db: null, queue: [], lastSync: null, settings: mergeSettings(null), demoPurged: false, lastBackup: null };
 const UI = {
   tab: 'routes', view: null, q: '', clientFilter: 'ACTIVE', orderFilter: 'ALL', shop: { status: 'ALL', tech: 'ALL', client: 'ALL' },
   invFilter: 'ALL', chem: { clientId: '', wbId: '', gal: '', n: 0 }, drafts: {}, form: null, dispatch: null, simOffline: false,
@@ -24,7 +24,7 @@ const idb = () => new Promise((res, rej) => { const r = indexedDB.open('epspr', 
 const idbGet = async (k) => { const d = await idb(); return new Promise((res) => { const q = d.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(undefined); }); };
 const idbSet = async (k, v) => { const d = await idb(); return new Promise((res) => { const t = d.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(); t.onerror = () => res(); }); };
 let persistTimer = null;
-const persist = () => { clearTimeout(persistTimer); persistTimer = setTimeout(() => idbSet('state', { db: S.db, queue: S.queue, lastSync: S.lastSync, settings: S.settings, demoPurged: S.demoPurged, lastBackup: S.lastBackup }).catch(() => {}), 300); };
+const persist = () => { clearTimeout(persistTimer); persistTimer = setTimeout(() => idbSet('state', { db: S.db, queue: S.queue, lastSync: S.lastSync, settings: S.settings, demoPurged: S.demoPurged, lastBackup: S.lastBackup, lock: S.lock }).catch(() => {}), 300); };
 
 /* ---------- mutaciones + cola de sincronización ---------- */
 let renderQueued = false;
@@ -577,6 +577,8 @@ function msgTab() {
     <div class="mt-s"></div>${btn('💾 Guardar respaldo en el teléfono', 'backupJson')}<div class="mt-s"></div>${btn('📤 Enviar / guardar en Drive o WhatsApp', 'shareBackup', {}, 'ghost')}<div class="mt-s"></div>${btn('📊 Exportar a Excel (.xlsx)', 'exportXlsx', {}, 'ghost')}
     ${muted('El archivo .json es el respaldo completo (clientes, historial, fotos, logo) y se puede restaurar. El Excel es para consultar o imprimir: clientes, facturas y lecturas.', 'mt-s')}
     <div class="mt"></div><label class="btn ghost">♻️ Restaurar desde un respaldo (.json)<input type="file" accept=".json,application/json" hidden data-restore="1"></label></div>
+    <h2>🔒 Clave de acceso</h2><div class="card">${S.lock ? `<b style="color:${COL.ok}">● Clave activa</b>${muted('Bloquear la app después de salir por:', 'mt-s')}<div class="chips mt-s">${AUTO_OPTS.map(([v, l]) => chip(l, (S.lock.auto ?? 5) === v, 'setAutoLock', { v })).join('')}</div>${btn('🔒 Bloquear ahora', 'lockNow', {}, 'dark')}<div class="btns"><button class="btn sm ghost" data-act="openPinSetup">Cambiar clave</button><button class="btn sm ghost" data-act="openPinRemove">Quitar clave</button></div>` : `Pide una clave de 4 a 6 números cada vez que se abre la app, para que nadie más haga cambios.<div class="mt-s"></div>${btn('Crear clave', 'openPinSetup', {}, 'dark')}`}
+    ${muted('Es una protección sencilla contra curiosos: no cifra los datos. Mantén también el bloqueo de pantalla del teléfono.', 'mt-s')}</div>
     <h2>Sistema y sincronización</h2><div class="card"><b style="color:${online() ? COL.ok : COL.warn}">${online() ? '● En línea' : '● Modo offline'}</b>${muted(`${S.queue.length} cambio(s) pendientes · Última sincronización: ${S.lastSync ? fmtDateTime(S.lastSync) : 'nunca'}`)}
     <div class="row between mt"><span>Simular modo sin conexión (prueba)</span><label class="sw"><input type="checkbox" data-sim="1"${UI.simOffline ? ' checked' : ''}><i></i></label></div>
     <div class="mt"></div>${btn(UI.syncing ? 'Sincronizando…' : 'Sincronizar ahora', 'syncNow', {}, 'ghost')}${muted('Versión de la app: '+APP_VERSION,'mt-s')}${UI.installEvt ? '<div class="mt-s"></div>' + btn('📲 Instalar app en este teléfono', 'install', {}, 'dark') : ''}</div>`;
@@ -668,6 +670,7 @@ let lastKey = '';
 function render() {
   const app = $('#app');
   if (!app || !S.db) return;
+  if (UI.locked) { lockRender(); return; }
   const key = UI.view ? UI.view.type + UI.view.id : UI.tab;
   const old = document.getElementById('page'), st = old && lastKey === key ? old.scrollTop : 0;
   const ae = document.activeElement, fid = ae && ae.id && app.contains(ae) ? ae.id : null, sel = fid && ae.selectionStart;
@@ -689,8 +692,75 @@ function go(type, id) { UI.view = { type, id }; render(); }
 /* =====================================================================
    Acciones (clics)
    ===================================================================== */
+
+/* =====================================================================
+   Clave de acceso (pantalla de bloqueo)
+   Protege contra curiosos o cambios accidentales; los datos no se cifran.
+   ===================================================================== */
+const toHex = (u) => [...u].map((b) => b.toString(16).padStart(2, '0')).join('');
+const fromHex = (h) => new Uint8Array(h.match(/../g).map((x) => parseInt(x, 16)));
+async function hashPin(pin, saltHex) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+  return toHex(new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: fromHex(saltHex), iterations: 120000 }, key, 256)));
+}
+const AUTO_OPTS = [[1, '1 min'], [5, '5 min'], [15, '15 min'], [-1, 'Solo al abrir']];
+function lockNow() { if (!S.lock) return; UI.locked = true; UI.pin = ''; UI.pinErr = ''; UI.view = null; closeSheet(); render(); }
+function lockHtml() {
+  const L = S.lock, wait = Math.max(0, Math.ceil(((L.until || 0) - Date.now()) / 1000));
+  const dots = Array.from({ length: L.len }, (_, i) => `<i class="${i < UI.pin.length ? 'on' : ''}"></i>`).join('');
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'].map((k) => (k === '' ? '<span></span>' : `<button data-act="pinKey" data-k="${k}"${wait ? ' disabled' : ''}>${k}</button>`)).join('');
+  return `<div class="lockscr"><div class="lk-ic">🔒</div><h1>Elite Pool Service PR</h1><div class="muted">${wait ? 'Demasiados intentos' : 'Escribe tu clave'}</div>
+    <div class="dots">${dots}</div><div class="lk-err">${wait ? `Espera ${wait} s para volver a intentar.` : esc(UI.pinErr || '')}</div><div class="keypad">${keys}</div>
+    <details class="lk-help"><summary>Olvidé mi clave</summary>La clave no se puede recuperar. Si tienes un respaldo (.json), borra los datos del sitio en Chrome (Configuración → Configuración de sitios → Todos los sitios → este sitio → Borrar y restablecer), abre la app y usa «Restaurar desde un respaldo».</details></div>`;
+}
+function lockRender() {
+  const app = $('#app'); if (!app) return;
+  app.innerHTML = lockHtml();
+  clearInterval(UI.lockTimer); UI.lockTimer = null;
+  if (S.lock && S.lock.until > Date.now()) UI.lockTimer = setInterval(() => { if (!UI.locked || S.lock.until <= Date.now()) { clearInterval(UI.lockTimer); UI.lockTimer = null; } if (UI.locked) lockRender(); }, 1000);
+}
+async function tryPin() {
+  const L = S.lock; if (!L || UI.checking) return;
+  UI.checking = true;
+  const okp = (await hashPin(UI.pin, L.salt)) === L.hash;
+  UI.checking = false;
+  if (okp) { L.fails = 0; L.until = 0; UI.locked = false; UI.pin = ''; UI.pinErr = ''; clearInterval(UI.lockTimer); UI.lockTimer = null; persist(); render(); return; }
+  L.fails = (L.fails || 0) + 1; UI.pin = '';
+  if (L.fails % 5 === 0) { L.until = Date.now() + Math.min(900, 30 * 2 ** (L.fails / 5 - 1)) * 1000; UI.pinErr = ''; }
+  else UI.pinErr = `Clave incorrecta (${5 - (L.fails % 5)} intento(s) antes de esperar)`;
+  persist(); lockRender();
+}
+function pinSheet(mode) { // 'set' | 'change' | 'remove'
+  const cur = mode !== 'set' ? fld('Clave actual', '<input id="lk_cur" type="password" inputmode="numeric" maxlength="6" autocomplete="off">') : '';
+  const nw = mode !== 'remove' ? fld('Clave nueva (4 a 6 números)', '<input id="lk_a" type="password" inputmode="numeric" maxlength="6" autocomplete="off">') + fld('Repite la clave', '<input id="lk_b" type="password" inputmode="numeric" maxlength="6" autocomplete="off">') : '';
+  openSheet(mode === 'set' ? 'Crear clave' : mode === 'change' ? 'Cambiar clave' : 'Quitar clave', `${cur}${nw}${mode === 'set' ? muted('Si la olvidas no hay forma de recuperarla; mantén tu respaldo al día.') : ''}<div class="mt"></div>${btn(mode === 'remove' ? 'Quitar clave' : 'Guardar clave', 'savePin', { mode }, mode === 'remove' ? 'danger' : '')}`);
+}
+function setupAutoLock() {
+  document.addEventListener('visibilitychange', () => {
+    if (!S.lock) return;
+    if (document.hidden) { UI.hiddenAt = Date.now(); return; }
+    const mins = S.lock.auto ?? 5;
+    if (!UI.locked && mins >= 0 && UI.hiddenAt && Date.now() - UI.hiddenAt >= mins * 60000) lockNow();
+  });
+}
+
 const A = {
   noop() {},
+  lockNow,
+  pinKey: (d) => { if (UI.checking || !S.lock) return; if (d.k === '⌫') UI.pin = UI.pin.slice(0, -1); else if (UI.pin.length < S.lock.len) UI.pin += d.k; UI.pinErr = ''; lockRender(); if (UI.pin.length === S.lock.len) tryPin(); },
+  openPinSetup: () => pinSheet(S.lock ? 'change' : 'set'), openPinRemove: () => pinSheet('remove'),
+  setAutoLock: (d) => { S.lock.auto = +d.v; persist(); render(); },
+  savePin: async (d) => {
+    const v = (id) => ((document.getElementById(id) || {}).value || '').trim();
+    if (d.mode !== 'set' && (await hashPin(v('lk_cur'), S.lock.salt)) !== S.lock.hash) return toast('La clave actual no es correcta');
+    if (d.mode === 'remove') { S.lock = null; persist(); closeSheet(); render(); return toast('Clave eliminada'); }
+    const a = v('lk_a');
+    if (!/^\d{4,6}$/.test(a)) return toast('La clave debe tener de 4 a 6 números');
+    if (a !== v('lk_b')) return toast('Las dos claves no coinciden');
+    const salt = toHex(crypto.getRandomValues(new Uint8Array(16)));
+    S.lock = { salt, hash: await hashPin(a, salt), len: a.length, auto: S.lock ? S.lock.auto : 5, fails: 0, until: 0 };
+    persist(); closeSheet(); render(); toast('Clave guardada');
+  },
   useGps: async () => {
     const msg = document.getElementById('gps_msg'), set = (t) => { if (msg) msg.textContent = t; };
     const la = document.querySelector('#frm [name="lat"]'), ln = document.querySelector('#frm [name="lng"]');
@@ -998,10 +1068,10 @@ async function boot() {
   window.addEventListener('offline', render);
   window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); UI.installEvt = e; render(); });
   window.addEventListener('appinstalled', () => { UI.installEvt = null; render(); });
-  setupBack();
+  setupBack(); setupAutoLock();
   try {
     const saved = await idbGet('state');
-    if (saved && saved.db) { S.db = saved.db; S.queue = saved.queue || []; S.lastSync = saved.lastSync || null; S.settings = mergeSettings(saved.settings); S.demoPurged = !!saved.demoPurged; S.lastBackup = saved.lastBackup || null; TABLES.forEach((t) => { if (!S.db[t]) S.db[t] = []; }); S.db.clients.forEach((c) => { if (!Array.isArray(c.service_days)) c.service_days = SAMPLE_DAYS[c.id] || []; }); }
+    if (saved && saved.db) { S.db = saved.db; S.queue = saved.queue || []; S.lastSync = saved.lastSync || null; S.settings = mergeSettings(saved.settings); S.demoPurged = !!saved.demoPurged; S.lastBackup = saved.lastBackup || null; S.lock = saved.lock || null; if (S.lock) { UI.locked = true; UI.pin = ''; } TABLES.forEach((t) => { if (!S.db[t]) S.db[t] = []; }); S.db.clients.forEach((c) => { if (!Array.isArray(c.service_days)) c.service_days = SAMPLE_DAYS[c.id] || []; }); }
   } catch (e) { /* IndexedDB no disponible: se usan datos de ejemplo en memoria */ }
   if (!S.db) { S.db = emptyDb(); S.demoPurged = true; }
   if (!S.demoPurged) { purgeDemo(); S.demoPurged = true; persist(); }
