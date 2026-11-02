@@ -120,9 +120,20 @@ function paymentInstructions(m, cfg) {
   return 'Coordine su transferencia con nosotros; le daremos los datos bancarios.';
 }
 /** Cuota mensual + piezas INSTALADAS + órdenes COMPLETADAS. */
+/** Texto del cobro del cliente: «$125.00 / mes» o «$35.00 por servicio». */
+const feeLabel = (c) => `${money(c.monthly_fee)} ${c.fee_type === 'PER_SERVICE' ? 'por servicio' : '/ mes'}`;
 function buildInvoice(client, db, period, today) {
-  const lines = [];
-  if (client.monthly_fee > 0) lines.push({ description: 'Cuota mensual de mantenimiento de piscina', amount: client.monthly_fee, kind: 'FEE' });
+  const lines = []; let stopIds = [];
+  if (client.fee_type === 'PER_SERVICE') {
+    // cobro por visita: cuenta las paradas completadas que aún no se han facturado (hasta el fin del periodo)
+    const dateOf = (s) => (db.routes.find((r) => r.id === s.route_id) || {}).date || '';
+    const visits = db.stops.filter((s) => s.status === 'DONE' && !s.invoice_id && db.properties.some((p) => p.id === s.property_id && p.client_id === client.id) && dateOf(s) && dateOf(s) <= `${period}-31`).sort((a, b) => dateOf(a).localeCompare(dateOf(b)));
+    if (visits.length && client.monthly_fee > 0) {
+      stopIds = visits.map((s) => s.id);
+      const days = visits.map((s) => fmtDate(dateOf(s)).replace(/ \d{4}$/, '')).join(', ');
+      lines.push({ description: `Mantenimiento de piscina — ${visits.length} visita${visits.length > 1 ? 's' : ''} × ${money(client.monthly_fee)} (${days})`, amount: Math.round(visits.length * client.monthly_fee * 100) / 100, kind: 'VISIT' });
+    }
+  } else if (client.monthly_fee > 0) lines.push({ description: 'Cuota mensual de mantenimiento de piscina', amount: client.monthly_fee, kind: 'FEE' });
   const items = db.shoppingItems.filter((i) => i.client_id === client.id && i.status === 'INSTALLED');
   items.forEach((i) => lines.push({ description: i.item_name, amount: i.price, kind: 'PART', ref_id: i.id }));
   const orders = db.workOrders.filter((w) => w.client_id === client.id && w.status === 'DONE');
@@ -132,12 +143,12 @@ function buildInvoice(client, db, period, today) {
     total_amount: Math.round(lines.reduce((s, l) => s + l.amount, 0) * 100) / 100,
     payment_method: 'ATH_MOVIL', status: 'DRAFT', due_date: addDays(today, 15), created_at: new Date().toISOString(),
   };
-  return { invoice, itemIds: items.map((i) => i.id), orderIds: orders.map((o) => o.id) };
+  return { invoice, itemIds: items.map((i) => i.id), orderIds: orders.map((o) => o.id), stopIds };
 }
 
 /* ---------- ajustes: negocio, logo y opciones del PDF ---------- */
 const DEFAULT_SETTINGS = {
-  biz: { name: 'Elite Pool Service PR', tagline: '', address: '', phone: '', email: '', regId: '', tech: '' },
+  biz: { name: 'Elite Pool Service PR', tagline: '', address: '', phone: '', email: '', regId: '', tech: '', team: 'Técnico 1, Técnico 2' },
   logo: null,
   pay: { athLink: '', athPhone: ATH_BUSINESS_PHONE },
   invoice: {
@@ -524,7 +535,7 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
     [client.phone && `Tel. ${client.phone}`, client.email, prop && `${prop.address}, ${prop.municipality}`].filter(Boolean).forEach((x) => L.push({ t: x, size: 9.5, c: GREY }));
     L.push({ space: 10 });
   }
-  const KIND = { FEE: 'Servicio mensual', PART: 'Pieza', WORK_ORDER: 'Orden de trabajo' };
+  const KIND = { FEE: 'Servicio mensual', VISIT: 'Servicio por visita', PART: 'Pieza', WORK_ORDER: 'Orden de trabajo' };
   const cols = o.itemType ? [0.07, 0.5, 0.25, 0.18] : [0.07, 0.75, 0, 0.18];
   const head = [{ t: '#', w: cols[0] }, { t: 'Descripción', w: cols[1] }];
   if (o.itemType) head.push({ t: 'Tipo', w: cols[2] });
@@ -541,7 +552,7 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
   if (o.subtotals && kinds.length > 1) {
     kinds.forEach((k) => {
       const sub = inv.lines.filter((l) => l.kind === k).reduce((s, l) => s + l.amount, 0);
-      L.push({ size: 10, pad: 2, row: [{ t: '', w: 0.55 }, { t: { FEE: 'Servicios', PART: 'Piezas', WORK_ORDER: 'Órdenes de trabajo' }[k], w: 0.27, align: 'right', c: GREY }, { t: money(sub), w: 0.18, align: 'right' }] });
+      L.push({ size: 10, pad: 2, row: [{ t: '', w: 0.55 }, { t: { FEE: 'Servicios', VISIT: 'Servicios', PART: 'Piezas', WORK_ORDER: 'Órdenes de trabajo' }[k], w: 0.27, align: 'right', c: GREY }, { t: money(sub), w: 0.18, align: 'right' }] });
     });
     L.push({ space: 4 });
   }
@@ -688,11 +699,11 @@ function backupSheets(db) {
   const DN = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
   const CH = { WHATSAPP: 'WhatsApp', EMAIL: 'Email', BOTH: 'Ambos' }, FM = { PDF: 'PDF', TEXT: 'Texto', BOTH: 'PDF + Texto' };
   const cname = (id) => (db.clients.find((c) => c.id === id) || {}).name || '';
-  const clientes = [['Nombre', 'Estado', 'Teléfono', 'Email', 'Cuota mensual', 'Días de servicio', 'Canal de envío', 'Formato de envío', 'Dirección', 'Municipio', 'Código de portón', 'Notas de acceso', 'Latitud', 'Longitud', 'Piscinas / cuerpos de agua', 'Etiquetas', 'Notas']];
+  const clientes = [['Nombre', 'Estado', 'Teléfono', 'Email', 'Tipo de cobro', 'Monto ($)', 'Días de servicio', 'Canal de envío', 'Formato de envío', 'Dirección', 'Municipio', 'Código de portón', 'Notas de acceso', 'Latitud', 'Longitud', 'Piscinas / cuerpos de agua', 'Etiquetas', 'Notas']];
   db.clients.forEach((c) => {
     const props = db.properties.filter((p) => p.client_id === c.id), p = props[0] || {};
     const wbs = db.waterBodies.filter((w) => props.some((x) => x.id === w.property_id)).map((w) => `${w.name} (${w.gallons} gal)`).join('; ');
-    clientes.push([c.name, c.status === 'ACTIVE' ? 'Activo' : 'Archivado', c.phone, c.email, +c.monthly_fee || 0, (c.service_days || []).map((d) => DN[d]).join(', '), CH[c.dispatch_channel_pref] || '', FM[c.dispatch_format_pref] || '', props.map((x) => x.address).join(' | '), p.municipality || '', p.gate_code || '', p.access_notes || '', p.lat ?? '', p.lng ?? '', wbs, (c.tags || []).join(', '), c.notes || '']);
+    clientes.push([c.name, c.status === 'ACTIVE' ? 'Activo' : 'Archivado', c.phone, c.email, c.fee_type === 'PER_SERVICE' ? 'Por servicio' : 'Mensual', +c.monthly_fee || 0, (c.service_days || []).map((d) => DN[d]).join(', '), CH[c.dispatch_channel_pref] || '', FM[c.dispatch_format_pref] || '', props.map((x) => x.address).join(' | '), p.municipality || '', p.gate_code || '', p.access_notes || '', p.lat ?? '', p.lng ?? '', wbs, (c.tags || []).join(', '), c.notes || '']);
   });
   const facturas = [['Número', 'Cliente', 'Período', 'Vence', 'Total', 'Estado', 'Método de pago']];
   db.invoices.forEach((i) => facturas.push([invNumber(i, db), cname(i.client_id), i.period, i.due_date, +i.total_amount || 0, STATUS_LABEL[effectiveStatus(i, todayISO())] || i.status, PAYMENT_LABEL[i.payment_method] || i.payment_method]));
@@ -759,4 +770,4 @@ async function processPhoto(file, kind, coords) {
   return { uri: cv.toDataURL('image/jpeg', 0.72), w, h };
 }
 
-if (typeof module !== 'undefined') module.exports = { athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
+if (typeof module !== 'undefined') module.exports = { feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };

@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v7 · Respaldo';
+const APP_VERSION = 'v9 · Equipo editable';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -13,6 +13,8 @@ const UI = {
   installEvt: null, syncing: false, msg: { tpl: 'feriado', area: 'ALL', subject: null, body: null, sent: {} },
 };
 const T = (k) => S.db[k];
+/** Nombres del equipo (editables en Ajustes → Equipo de trabajo), separados por coma. */
+const techList = () => (S.settings.biz.team || '').split(',').map((x) => x.trim()).filter(Boolean);
 const find = (t, id) => S.db[t].find((r) => r.id === id);
 const $ = (s) => document.querySelector(s);
 const online = () => navigator.onLine && !UI.simOffline;
@@ -310,7 +312,7 @@ function clientsTab() {
     const props = T('properties').filter((p) => p.client_id === c.id);
     const wbc = T('waterBodies').filter((w) => props.some((p) => p.id === w.property_id)).length;
     return `<div class="card tap" data-act="openClient" data-id="${c.id}"><div class="row between"><b>${esc(c.name)}</b>${badge(c.status === 'ACTIVE' ? 'Activo' : 'Archivado', c.status === 'ACTIVE' ? COL.ok : COL.pending)}</div>
-      ${muted(esc(props.map((p) => p.municipality).filter(Boolean).join(', ') || 'Sin propiedad') + ` · ${wbc} cuerpo(s) de agua · ${money(c.monthly_fee)}/mes`, 'mt-s')}${muted('Envío: ' + esc(prefText(c)))}${muted('Días de servicio: ' + esc(daysText(c)))}</div>`;
+      ${muted(esc(props.map((p) => p.municipality).filter(Boolean).join(', ') || 'Sin propiedad') + ` · ${wbc} cuerpo(s) de agua · ${feeLabel(c)}`, 'mt-s')}${muted('Envío: ' + esc(prefText(c)))}${muted('Días de servicio: ' + esc(daysText(c)))}</div>`;
   }).join('') + '</div>' : empty(T('clients').length ? 'No hay clientes en esta vista.' : 'Aún no tienes clientes. Toca «+ Nuevo» para agregar el primero (puedes usar el GPS estando frente a la casa).');
   return { title: 'Clientes', sub: `${activeClients().length} activos`, right: btn('+ Nuevo', 'newClient', {}, 'sm'), body: h };
 }
@@ -318,7 +320,7 @@ function clientsTab() {
 function clientView(id) {
   const c = find('clients', id);
   if (!c) return { title: '—', body: empty('Cliente no encontrado.') };
-  let h = `<div class="card"><div>📞 ${esc(c.phone || '—')}</div><div>✉️ ${esc(c.email || '—')}</div><div>💵 ${money(c.monthly_fee)} / mes</div>${c.notes ? muted(esc(c.notes), 'mt-s') : ''}${c.tags.length ? muted('Etiquetas: ' + esc(c.tags.join(', ')), 'mt-s') : ''}</div>
+  let h = `<div class="card"><div>📞 ${esc(c.phone || '—')}</div><div>✉️ ${esc(c.email || '—')}</div><div>💵 ${feeLabel(c)}</div><div class="mt-s">${seg(c.fee_type || 'MONTHLY', [['MONTHLY', 'Cobro mensual'], ['PER_SERVICE', 'Por servicio']], 'setPref', { id: c.id, f: 'fee_type' })}</div>${c.notes ? muted(esc(c.notes), 'mt-s') : ''}${c.tags.length ? muted('Etiquetas: ' + esc(c.tags.join(', ')), 'mt-s') : ''}</div>
     <h2>Días de servicio</h2><div class="card"><div class="chips">${DAYS.map((n, i) => chip(DAYS_S[i], (c.service_days || []).includes(i), 'toggleClientDay', { id: c.id, d: i })).join('')}</div>${muted('Toca los días en que le das servicio. La ruta de cada día incluye a sus clientes.')}</div>
     <h2>Preferencias de envío guardadas</h2><div class="card">${muted('Canal predeterminado')}${seg(c.dispatch_channel_pref, CHANNELS, 'setPref', { id: c.id, f: 'dispatch_channel_pref' })}
     <div class="mt">${muted('Formato predeterminado')}</div>${seg(c.dispatch_format_pref, FORMATS, 'setPref', { id: c.id, f: 'dispatch_format_pref' })}
@@ -342,7 +344,7 @@ function clientView(id) {
 /* formularios genéricos (hoja inferior) */
 const CLIENT_F = [
   { k: 'name', l: 'Nombre', req: 1 }, { k: 'phone', l: 'Teléfono (WhatsApp)', t: 'tel', ph: '787-555-0100' }, { k: 'email', l: 'Email', t: 'email' },
-  { k: 'monthly_fee', l: 'Cuota mensual ($)', t: 'number' }, { k: 'tags', l: 'Etiquetas (separadas por coma)', ph: 'Caguas, Residencial' }, { k: 'service_days', l: 'Días de servicio (puedes marcar varios)', t: 'days' },
+  { k: 'fee_type', l: 'Tipo de cobro', t: 'choice', o: [['MONTHLY', 'Mensual'], ['PER_SERVICE', 'Por servicio']] }, { k: 'monthly_fee', l: 'Monto ($): por mes o por cada visita', t: 'number' }, { k: 'tags', l: 'Etiquetas (separadas por coma)', ph: 'Caguas, Residencial' }, { k: 'service_days', l: 'Días de servicio (puedes marcar varios)', t: 'days' },
   { k: 'channel', l: 'Canal de envío predeterminado', t: 'choice', o: CHANNELS }, { k: 'format', l: 'Formato de envío predeterminado', t: 'choice', o: FORMATS }, { k: 'notes', l: 'Notas', t: 'area' },
 ];
 const PROP_F = [
@@ -368,7 +370,7 @@ function formFieldHtml(f, val) {
 function openForm(kind, id, parent) {
   const defs = { client: [CLIENT_F, 'cliente'], prop: [PROP_F, 'propiedad'], wb: [WB_F, 'cuerpo de agua'], equip: [EQ_F, 'equipo'] }[kind];
   let v = {};
-  if (kind === 'client') { const c = id && find('clients', id); v = c ? { name: c.name, phone: c.phone, email: c.email, monthly_fee: c.monthly_fee, tags: c.tags.join(', '), service_days: (c.service_days || []).join(','), channel: c.dispatch_channel_pref, format: c.dispatch_format_pref, notes: c.notes } : { channel: 'WHATSAPP', format: 'TEXT', monthly_fee: 0 }; }
+  if (kind === 'client') { const c = id && find('clients', id); v = c ? { name: c.name, phone: c.phone, email: c.email, fee_type: c.fee_type || 'MONTHLY', monthly_fee: c.monthly_fee, tags: c.tags.join(', '), service_days: (c.service_days || []).join(','), channel: c.dispatch_channel_pref, format: c.dispatch_format_pref, notes: c.notes } : { channel: 'WHATSAPP', format: 'TEXT', fee_type: 'MONTHLY', monthly_fee: 0 }; }
   if (kind === 'prop') { const p = id && find('properties', id); v = p ? { ...p } : {}; }
   if (kind === 'wb') { const w = id && find('waterBodies', id); v = w ? { ...w } : { type: 'Pool' }; }
   if (kind === 'equip') { const e = id && find('equipment', id); v = e ? { ...e } : { status: 'OK' }; }
@@ -384,7 +386,7 @@ function submitForm() {
   if (F.kind === 'client') {
     const old = F.id && find('clients', F.id);
     const cid = old ? old.id : uid('c');
-    upsert('clients', { id: cid, name: g('name'), phone: g('phone'), email: g('email'), dispatch_channel_pref: g('channel') || 'WHATSAPP', dispatch_format_pref: g('format') || 'TEXT', status: old ? old.status : 'ACTIVE', notes: g('notes'), monthly_fee: toNum(g('monthly_fee')) || 0, tags: g('tags').split(',').map((t) => t.trim()).filter(Boolean), service_days: g('service_days').split(',').filter((x) => x !== '').map(Number).sort() });
+    upsert('clients', { id: cid, name: g('name'), phone: g('phone'), email: g('email'), dispatch_channel_pref: g('channel') || 'WHATSAPP', dispatch_format_pref: g('format') || 'TEXT', status: old ? old.status : 'ACTIVE', notes: g('notes'), fee_type: g('fee_type') === 'PER_SERVICE' ? 'PER_SERVICE' : 'MONTHLY', monthly_fee: toNum(g('monthly_fee')) || 0, tags: g('tags').split(',').map((t) => t.trim()).filter(Boolean), service_days: g('service_days').split(',').filter((x) => x !== '').map(Number).sort() });
     if (!old && (g('address') || g('lat'))) {
       upsert('properties', { id: uid('p'), client_id: cid, address: g('address') || 'Sin dirección', municipality: g('municipality'), gate_code: g('gate_code'), access_notes: '', lat: toNum(g('lat')) ?? DEPOT.lat, lng: toNum(g('lng')) ?? DEPOT.lng });
     }
@@ -465,7 +467,8 @@ function shopTab() {
   const f = UI.shop;
   const items = T('shoppingItems').filter((i) => (f.status === 'ALL' || i.status === f.status) && (f.tech === 'ALL' || i.assigned_to === f.tech) && (f.client === 'ALL' || i.client_id === f.client)).sort((a, b) => SHOP_FLOW.indexOf(a.status) - SHOP_FLOW.indexOf(b.status));
   let h = '<div class="chips">' + chip('Todos', f.status === 'ALL', 'shopF', { k: 'status', v: 'ALL' }) + SHOP_FLOW.map((s) => chip(SHOP_LABEL[s], f.status === s, 'shopF', { k: 'status', v: s }, SHOP_COLOR[s])).join('') + '</div>';
-  h += muted('Técnico', 'mb') + '<div class="chips">' + chip('Todos', f.tech === 'ALL', 'shopF', { k: 'tech', v: 'ALL' }) + TECHNICIANS.map((t) => chip(t, f.tech === t, 'shopF', { k: 'tech', v: t })).join('') + '</div>';
+  h += muted('Técnico', 'mb') + '<div class="chips">' + chip('Todos', f.tech === 'ALL', 'shopF', { k: 'tech', v: 'ALL' }) + [...new Set([...techList(), ...T('shoppingItems').map((i) => i.assigned_to).filter(Boolean)])].map((t) => chip(t, f.tech === t, 'shopF', { k: 'tech', v: t })).join('') + '</div>';
+  h += `<div class="mb">${btn('✏️ Editar nombres del equipo', 'openPdfSettings', {}, 'sm ghost')}</div>`;
   h += muted('Cliente', 'mb') + '<div class="chips">' + chip('Todos', f.client === 'ALL', 'shopF', { k: 'client', v: 'ALL' }) + activeClients().map((c) => chip(c.name, f.client === c.id, 'shopF', { k: 'client', v: c.id })).join('') + '</div>';
   h += items.length ? '<div class="cols">' + items.map((i) => `<div class="card bar tap" style="border-left-color:${SHOP_COLOR[i.status]}" data-act="editItem" data-id="${i.id}"><div class="row between"><b>${esc(i.item_name)}</b>${badge(SHOP_LABEL[i.status], SHOP_COLOR[i.status])}</div>
     ${muted(esc(clientName(i.client_id) + ' · ' + i.assigned_to), 'mt-s')}${muted(`Costo ${money(i.cost)} · Precio ${money(i.price)} · Margen ${money(i.price - i.cost)}`)}
@@ -479,7 +482,7 @@ function itemSheet(id) {
   openSheet(id ? 'Editar pieza' : 'Nueva pieza', `${fld('Pieza / repuesto *', input('i_name', i ? i.item_name : ''))}
     ${fld('Cliente', `<select id="i_client">${optList(activeClients().map((c) => [c.id, c.name]), i && i.client_id)}</select>`)}
     <div class="g2">${fld('Costo ($)', input('i_cost', i ? i.cost : '', 'inputmode="decimal"'))}${fld('Precio al cliente ($)', input('i_price', i ? i.price : '', 'inputmode="decimal"'))}</div>
-    ${fld('Técnico asignado', `<select id="i_tech">${optList(TECHNICIANS.map((t) => [t, t]), i && i.assigned_to)}</select>`)}${btn('Guardar', 'saveItem')}
+    ${fld('Técnico asignado', `<select id="i_tech">${optList([...new Set([...techList(), ...(i && i.assigned_to ? [i.assigned_to] : [])])].map((t) => [t, t]), i && i.assigned_to)}</select>`)}${btn('Guardar', 'saveItem')}
     ${id ? `<div class="mt-s"></div>${btn('Eliminar pieza', 'delItem', { id }, 'danger')}` : ''}`);
 }
 
@@ -503,7 +506,7 @@ function invoiceView(id) {
   const inv = find('invoices', id), c = inv && find('clients', inv.client_id);
   if (!inv || !c) return { title: '—', body: empty('Factura no encontrada.') };
   const h = `<div class="card"><b>${esc(c.name)}</b>${muted('Vence ' + fmtDate(inv.due_date))}<div class="mt-s">${badge(STATUS_LABEL[invView(inv)], INV_COLOR[invView(inv)])}</div></div>
-    <h2>Desglose</h2><div class="card">${inv.lines.map((l) => `<div class="row between" style="padding:6px 0"><span>${l.kind === 'FEE' ? '🗓' : l.kind === 'PART' ? '🔧' : '📋'} ${esc(l.description)}</span><b>${money(l.amount)}</b></div>`).join('')}
+    <h2>Desglose</h2><div class="card">${inv.lines.map((l) => `<div class="row between" style="padding:6px 0"><span>${l.kind === 'FEE' || l.kind === 'VISIT' ? '🗓' : l.kind === 'PART' ? '🔧' : '📋'} ${esc(l.description)}</span><b>${money(l.amount)}</b></div>`).join('')}
     <div class="row between" style="border-top:1px solid var(--border);margin-top:6px;padding-top:8px"><b style="font-size:18px">Total</b><span class="amount">${money(inv.total_amount)}</span></div></div>
     <h2>Método de pago</h2>${seg(inv.payment_method, [['ATH_MOVIL', 'ATH Móvil'], ['CARD', 'Tarjeta'], ['STRIPE', 'Stripe'], ['TRANSFER', 'Transf.']], 'setPayment', { id: inv.id })}
     <div class="card mt" style="background:#f0f9ff;border-color:${COL.water}">${inv.payment_method === 'ATH_MOVIL' ? `${muted('ATH Móvil Business')}${athUrl(S.settings) ? `<div class="mt-s"><a href="${esc(athUrl(S.settings))}" target="_blank" rel="noopener" style="word-break:break-all">${esc(athUrl(S.settings))}</a></div>` : ''}${S.settings.pay.athPhone ? `<div class="big" style="color:${COL.water}">${esc(S.settings.pay.athPhone)}</div>` : ''}${!athUrl(S.settings) && !S.settings.pay.athPhone ? muted('Aún no hay enlace ni número. Configúralo abajo.') : ''}` : ''}<div class="mt-s">${esc(paymentInstructions(inv.payment_method, S.settings))}</div></div>
@@ -515,11 +518,12 @@ function invoiceView(id) {
 function createInvoiceFor(c) {
   const period = todayISO().slice(0, 7);
   if (T('invoices').some((i) => i.client_id === c.id && i.period === period)) return false;
-  const { invoice, itemIds, orderIds } = buildInvoice(c, S.db, period, todayISO());
+  const { invoice, itemIds, orderIds, stopIds } = buildInvoice(c, S.db, period, todayISO());
   if (!invoice.lines.length) return false;
   upsert('invoices', invoice);
   itemIds.forEach((id) => upsert('shoppingItems', { ...find('shoppingItems', id), status: 'INVOICED' }));
   orderIds.forEach((id) => upsert('workOrders', { ...find('workOrders', id), status: 'INVOICED' }));
+  stopIds.forEach((id) => upsert('stops', { ...find('stops', id), invoice_id: invoice.id }));
   return true;
 }
 
@@ -635,6 +639,7 @@ function pdfView() {
   const body = `<h2>Logo</h2><div class="card">${st.logo ? `<div style="background:#fff;border:1px solid var(--border);border-radius:12px;padding:10px;text-align:center"><img src="${st.logo.data}" alt="Logo" style="max-width:100%;max-height:110px"></div><div class="btns"><label class="btn sm ghost">Cambiar logo<input type="file" accept="image/*" hidden data-logo="1"></label>${btn('Quitar', 'delLogo', {}, 'sm danger')}</div>` : `${muted('Sube tu logo (PNG o JPG). Se reduce y se guarda en el teléfono.')}<div class="mt-s"></div><label class="btn">📷 Subir logo<input type="file" accept="image/*" hidden data-logo="1"></label>`}
     ${muted('El logo sale en la factura. En el informe de servicio se activa con su propio interruptor.', 'mt-s')}</div>
     <h2>💳 Cobro con ATH Móvil Business</h2><div class="card">${fld('Enlace de pago ATH Móvil Business', `<input data-setv="pay.athLink" type="url" inputmode="url" autocapitalize="off" value="${esc(st.pay.athLink)}" placeholder="https://…">`)}${tx('pay.athPhone', 'Número ATH Móvil (opcional)', '939-405-7458')}${muted('Pega aquí tu enlace de ATH Móvil Business. Sale en la factura (PDF clicable y texto de WhatsApp) y en la pantalla de la factura. Si lo dejas vacío, solo se muestra el número.')}${st.pay.athLink ? `<div class="mt-s"><a href="${esc(athUrl(st))}" target="_blank" rel="noopener">Probar enlace ↗</a></div>` : ''}</div>
+    <h2>👷 Equipo de trabajo</h2><div class="card">${tx('biz.team', 'Nombres separados por coma', 'Carlos, Luis')}${muted('Se usan en Compras para asignar quién compra o instala cada pieza. Si trabajas solo, déjalo con un nombre.')}</div>
     <h2>Datos del negocio</h2><div class="card">${tx('biz.name', 'Nombre')}${tx('biz.tagline', 'Lema (opcional)', 'Mantenimiento de piscinas')}${tx('biz.address', 'Dirección', 'Caguas, Puerto Rico')}${tx('biz.phone', 'Teléfono')}${tx('biz.email', 'Correo')}${tx('biz.regId', 'Registro / Núm. comerciante (opcional)')}${tx('biz.tech', 'Técnico por defecto (informe)')}</div>
     <h2>🧾 Factura — qué incluir</h2><div class="card">${tgl('invoice', INV_OPTS)}
     ${fld('Términos', `<textarea data-setv="invoice.termsText" style="min-height:70px">${esc(st.invoice.termsText)}</textarea>`)}${fld('Texto del pie', `<input data-setv="invoice.footerText" value="${esc(st.invoice.footerText)}">`)}</div>
@@ -642,7 +647,7 @@ function pdfView() {
     ${fld('Texto del pie', `<input data-setv="report.footerText" value="${esc(st.report.footerText)}">`)}</div>
     ${btn('Restaurar opciones originales', 'resetPdf', {}, 'sm ghost')}`;
   const footer = `<div class="btns" style="margin-top:0">${btn('👁 Factura', 'previewPdf', { kind: 'invoice' })}${btn('👁 Informe', 'previewPdf', { kind: 'report' }, 'ghost')}</div>`;
-  return { title: 'Personalizar PDF', body, footer };
+  return { title: 'Ajustes, equipo y PDF', body, footer };
 }
 const VIEW_FN = { stop: stopView, client: clientView, order: orderView, invoice: invoiceView, pdf: pdfView };
 
@@ -816,7 +821,7 @@ const A = {
   addPart: (d) => {
     const el = $('#part_name'), name = el && el.value.trim(), s = find('stops', d.stop);
     if (!name) return;
-    upsert('shoppingItems', { id: uid('sh'), stop_id: s.id, client_id: find('properties', s.property_id).client_id, item_name: name, cost: 0, price: 0, status: 'REQUIRED', assigned_to: TECHNICIANS[0], created_at: new Date().toISOString() });
+    upsert('shoppingItems', { id: uid('sh'), stop_id: s.id, client_id: find('properties', s.property_id).client_id, item_name: name, cost: 0, price: 0, status: 'REQUIRED', assigned_to: techList()[0] || '', created_at: new Date().toISOString() });
   },
   delPhoto: (d) => { if (confirm('¿Quitar esta foto?')) remove('photos', d.id); },
 
@@ -883,7 +888,7 @@ const A = {
   bulkInvoices: () => {
     const period = todayISO().slice(0, 7), targets = activeClients().filter((c) => !T('invoices').some((i) => i.client_id === c.id && i.period === period));
     if (!targets.length) return alert(`Todos los clientes activos ya tienen factura de ${period}.`);
-    if (confirm(`Se crearán ${targets.length} factura(s) de ${period} (cuota + piezas instaladas + órdenes completadas).`)) targets.forEach(createInvoiceFor);
+    if (confirm(`Se crearán ${targets.length} factura(s) de ${period} (cuota o visitas realizadas + piezas instaladas + órdenes completadas).`)) targets.forEach(createInvoiceFor);
   },
   newInvoice: () => openSheet('Factura individual', `${muted('Elige el cliente (periodo ' + todayISO().slice(0, 7) + ')')}<div class="chips mt-s">${activeClients().map((c) => chip(c.name, false, 'invFor', { id: c.id })).join('')}</div>`),
   invFor: (d) => { closeSheet(); if (!createInvoiceFor(find('clients', d.id))) alert('Ese cliente ya tiene factura de este periodo o no tiene nada que facturar.'); },
@@ -895,11 +900,12 @@ const A = {
   },
   delDraft: (d) => {
     const inv = find('invoices', d.id);
-    if (!confirm('Las piezas y órdenes incluidas volverán a quedar pendientes de facturar.')) return;
+    if (!confirm('Las visitas, piezas y órdenes incluidas volverán a quedar pendientes de facturar.')) return;
     inv.lines.forEach((l) => {
       if (l.kind === 'PART' && find('shoppingItems', l.ref_id)) upsert('shoppingItems', { ...find('shoppingItems', l.ref_id), status: 'INSTALLED' });
       if (l.kind === 'WORK_ORDER' && find('workOrders', l.ref_id)) upsert('workOrders', { ...find('workOrders', l.ref_id), status: 'DONE' });
     });
+    T('stops').filter((s) => s.invoice_id === inv.id).forEach((s) => upsert('stops', { ...s, invoice_id: null }));
     remove('invoices', inv.id); UI.view = null; render();
   },
 
