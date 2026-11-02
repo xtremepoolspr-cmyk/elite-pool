@@ -699,12 +699,14 @@ function backupSheets(db) {
   const DN = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
   const CH = { WHATSAPP: 'WhatsApp', EMAIL: 'Email', BOTH: 'Ambos' }, FM = { PDF: 'PDF', TEXT: 'Texto', BOTH: 'PDF + Texto' };
   const cname = (id) => (db.clients.find((c) => c.id === id) || {}).name || '';
-  const clientes = [['Nombre', 'Estado', 'Teléfono', 'Email', 'Tipo de cobro', 'Monto ($)', 'Días de servicio', 'Canal de envío', 'Formato de envío', 'Dirección', 'Municipio', 'Código de portón', 'Notas de acceso', 'Latitud', 'Longitud', 'Piscinas / cuerpos de agua', 'Etiquetas', 'Notas']];
+  const clientes = [['Nombre', 'Estado', 'Teléfono', 'Email', 'Tipo de cobro', 'Monto ($)', 'Canal de envío', 'Formato de envío', 'Dirección', 'Municipio', 'Código de portón', 'Notas de acceso', 'Latitud', 'Longitud', 'Piscinas / cuerpos de agua', 'Etiquetas', 'Notas']];
   db.clients.forEach((c) => {
     const props = db.properties.filter((p) => p.client_id === c.id), p = props[0] || {};
     const wbs = db.waterBodies.filter((w) => props.some((x) => x.id === w.property_id)).map((w) => `${w.name} (${w.gallons} gal)`).join('; ');
-    clientes.push([c.name, c.status === 'ACTIVE' ? 'Activo' : 'Archivado', c.phone, c.email, c.fee_type === 'PER_SERVICE' ? 'Por servicio' : 'Mensual', +c.monthly_fee || 0, (c.service_days || []).map((d) => DN[d]).join(', '), CH[c.dispatch_channel_pref] || '', FM[c.dispatch_format_pref] || '', props.map((x) => x.address).join(' | '), p.municipality || '', p.gate_code || '', p.access_notes || '', p.lat ?? '', p.lng ?? '', wbs, (c.tags || []).join(', '), c.notes || '']);
+    clientes.push([c.name, c.status === 'ACTIVE' ? 'Activo' : 'Archivado', c.phone, c.email, c.fee_type === 'PER_SERVICE' ? 'Por servicio' : 'Mensual', +c.monthly_fee || 0, CH[c.dispatch_channel_pref] || '', FM[c.dispatch_format_pref] || '', props.map((x) => x.address).join(' | '), p.municipality || '', p.gate_code || '', p.access_notes || '', p.lat ?? '', p.lng ?? '', wbs, (c.tags || []).join(', '), c.notes || '']);
   });
+  const props = [['Cliente', 'Dirección', 'Municipio', 'Días de servicio', 'Código de portón', 'Notas de acceso', 'Latitud', 'Longitud', 'Cuerpos de agua']];
+  db.properties.forEach((p) => props.push([cname(p.client_id), p.address, p.municipality, (p.service_days || []).map((d) => DN[d]).join(', '), p.gate_code || '', p.access_notes || '', p.lat ?? '', p.lng ?? '', db.waterBodies.filter((w) => w.property_id === p.id).map((w) => `${w.name} (${w.gallons} gal)`).join('; ')]));
   const facturas = [['Número', 'Cliente', 'Período', 'Vence', 'Total', 'Estado', 'Método de pago']];
   db.invoices.forEach((i) => facturas.push([invNumber(i, db), cname(i.client_id), i.period, i.due_date, +i.total_amount || 0, STATUS_LABEL[effectiveStatus(i, todayISO())] || i.status, PAYMENT_LABEL[i.payment_method] || i.payment_method]));
   const lecturas = [['Fecha', 'Cliente', 'Cuerpo de agua', 'Cloro libre', 'pH', 'Alcalinidad', 'Ác. cianúrico', 'Sal', 'Dureza de calcio']];
@@ -712,7 +714,7 @@ function backupSheets(db) {
     const w = db.waterBodies.find((x) => x.id === r.water_body_id) || {}, p = db.properties.find((x) => x.id === w.property_id) || {};
     lecturas.push([(r.created_at || '').slice(0, 10), cname(p.client_id), w.name || '', r.free_chlorine ?? '', r.ph ?? '', r.alkalinity ?? '', r.cyanuric_acid ?? '', r.salt ?? '', r.calcium_hardness ?? '']);
   });
-  return [{ name: 'Clientes', rows: clientes }, { name: 'Facturas', rows: facturas }, { name: 'Lecturas químicas', rows: lecturas }];
+  return [{ name: 'Clientes', rows: clientes }, { name: 'Propiedades', rows: props }, { name: 'Facturas', rows: facturas }, { name: 'Lecturas químicas', rows: lecturas }];
 }
 
 /* ---------- ubicación y fotos con sello ---------- */

@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v11 · Horas opcionales';
+const APP_VERSION = 'v12 · Días por propiedad';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -124,11 +124,22 @@ const DAYS_S = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
 const routeDate = () => UI.routeDate || todayISO();
 const dow = (iso) => new Date(iso + 'T12:00:00').getDay();
 const curRoute = () => T('routes').find((r) => r.date === routeDate() && r.technician_id === ME);
-const scheduledFor = (iso) => activeClients().filter((c) => (c.service_days || []).includes(dow(iso)));
-const daysText = (c) => (c.service_days && c.service_days.length ? [...c.service_days].sort().map((d) => DAYS_S[d]).join(', ') : 'sin días asignados');
-function addStopsFor(rid, clients, offset) {
+const activeProps = () => { const ids = new Set(activeClients().map((c) => c.id)); return T('properties').filter((p) => ids.has(p.client_id)); };
+/** Los días de servicio son POR PROPIEDAD. */
+const scheduledProps = (iso) => activeProps().filter((p) => (p.service_days || []).includes(dow(iso)));
+const daysText = (o) => (o && o.service_days && o.service_days.length ? [...o.service_days].sort().map((d) => DAYS_S[d]).join(', ') : 'sin días asignados');
+const clientDaysText = (c) => { const u = new Set(); T('properties').filter((p) => p.client_id === c.id).forEach((p) => (p.service_days || []).forEach((d) => u.add(d))); return u.size ? [...u].sort().map((d) => DAYS_S[d]).join(', ') : 'sin días asignados'; };
+/** Datos viejos: los días que estaban en el cliente pasan a cada una de sus propiedades (una sola vez). */
+function migrateDb(db) {
+  TABLES.forEach((t) => { if (!Array.isArray(db[t])) db[t] = []; });
+  db.properties.forEach((p) => {
+    if (!Array.isArray(p.service_days)) { const c = db.clients.find((x) => x.id === p.client_id); p.service_days = c && Array.isArray(c.service_days) ? [...c.service_days] : []; }
+  });
+  return db;
+}
+function addStopsFor(rid, propList, offset) {
   const have = new Set(T('stops').filter((s) => s.route_id === rid).map((s) => s.property_id));
-  const props = T('properties').filter((p) => clients.some((c) => c.id === p.client_id) && !have.has(p.id));
+  const props = propList.filter((p) => !have.has(p.id));
   const draft = props.map((p) => ({ id: uid('s'), route_id: rid, property_id: p.id, order_index: 0, check_in_time: null, check_out_time: null, check_in_lat: null, check_in_lng: null, status: 'PENDING', checklist: [], active_water_body_ids: T('waterBodies').filter((w) => w.property_id === p.id).slice(0, 1).map((w) => w.id) }));
   const order = optimizeOrder(draft, T('properties'));
   draft.forEach((s) => upsert('stops', { ...s, order_index: offset + order.indexOf(s.id), checklist: mkChecklist(s.id) }));
@@ -218,18 +229,18 @@ function routesTab() {
   const sub = `${dn} ${fmtDate(date)}${route ? ` · ${done} de ${stops.length} completadas` : ''}`;
   const right = UI.installEvt ? btn('📲 Instalar', 'install', {}, 'sm') : '';
   if (!route) {
-    const sched = scheduledFor(date);
+    const sched = scheduledProps(date);
     return { title, sub, right, body: weekStrip() + `<div class="card">${sched.length
-      ? `<b>${sched.length} cliente(s) programados el ${dn}</b>${muted(esc(sched.map((c) => c.name).join(', ')))}<div class="mt"></div>${btn('Crear ruta del ' + dn, 'createRoute', { all: '0' })}`
-      : empty(`Ningún cliente tiene asignado el ${dn}. Asigna los días en la pestaña Clientes.`)}<div class="mt-s"></div>${btn('Crear ruta con todos los clientes activos', 'createRoute', { all: '1' }, 'ghost')}</div>` };
+      ? `<b>${sched.length} propiedad(es) programadas el ${dn}</b>${muted(esc(sched.map((p) => clientName(p.client_id) + ' — ' + p.address).join(' · ')))}<div class="mt"></div>${btn('Crear ruta del ' + dn, 'createRoute', { all: '0' })}`
+      : empty(`Ninguna propiedad tiene asignado el ${dn}. Asigna los días en cada propiedad (pestaña Clientes).`)}<div class="mt-s"></div>${btn('Crear ruta con todas las propiedades activas', 'createRoute', { all: '1' }, 'ghost')}</div>` };
   }
   const pending = stops.filter((s) => s.status !== 'DONE').map((s) => find('properties', s.property_id)).filter(Boolean);
   const url = routeUrl(pending);
   const inRoute = new Set(stops.map((s) => s.property_id));
-  const missing = scheduledFor(date).filter((c) => T('properties').some((p) => p.client_id === c.id && !inRoute.has(p.id)));
+  const missing = scheduledProps(date).filter((p) => !inRoute.has(p.id));
   let h = weekStrip() + `<div class="progress"><i style="width:${stops.length ? (done / stops.length) * 100 : 0}%"></i></div>${mapHtml(stops)}`;
   h += `<div class="btns" style="margin:0 0 12px">${btn('↕ Optimizar ruta', 'optimize', {}, 'sm ghost')}${url ? `<a class="btn sm ghost" href="${esc(url)}" target="_blank" rel="noopener">🗺 Abrir en Mapas</a>` : ''}</div>`;
-  if (missing.length) h += `<div class="mb">${btn(`+ Añadir ${missing.length} cliente(s) programados que faltan`, 'addMissing', {}, 'ghost')}</div>`;
+  if (missing.length) h += `<div class="mb">${btn(`+ Añadir ${missing.length} propiedad(es) programadas que faltan`, 'addMissing', {}, 'ghost')}</div>`;
   h += '<div class="cols">' + stops.map((s) => {
     const p = find('properties', s.property_id), c = p && find('clients', p.client_id);
     if (!p || !c) return '';
@@ -238,7 +249,7 @@ function routesTab() {
       : btn('📤 Enviar informe', 'sendStop', { id: s.id }, 'sm ghost');
     return `<div class="card bar tap" style="border-left-color:${ST_COLOR[s.status]}" data-act="openStop" data-id="${s.id}">
       <div class="row"><div class="dot" style="position:static;margin:0;background:${ST_COLOR[s.status]}">${s.order_index + 1}</div>
-      <div class="grow"><b>${esc(c.name)}</b>${muted(esc(p.address + ', ' + p.municipality))}${muted('Días: ' + esc(daysText(c)))}</div>${badge(ST_LABEL[s.status], ST_COLOR[s.status])}</div>
+      <div class="grow"><b>${esc(c.name)}</b>${muted(esc(p.address + ', ' + p.municipality))}${muted('Días: ' + esc(daysText(p)))}</div>${badge(ST_LABEL[s.status], ST_COLOR[s.status])}</div>
       ${s.check_in_time ? muted(`Entrada ${fmtTime(s.check_in_time)}${s.check_out_time ? ' · Salida ' + fmtTime(s.check_out_time) : ''}`, 'mt-s') : ''}
       <div class="mt">${actions}</div></div>`;
   }).join('') + '</div>';
@@ -312,7 +323,7 @@ function clientsTab() {
     const props = T('properties').filter((p) => p.client_id === c.id);
     const wbc = T('waterBodies').filter((w) => props.some((p) => p.id === w.property_id)).length;
     return `<div class="card tap" data-act="openClient" data-id="${c.id}"><div class="row between"><b>${esc(c.name)}</b>${badge(c.status === 'ACTIVE' ? 'Activo' : 'Archivado', c.status === 'ACTIVE' ? COL.ok : COL.pending)}</div>
-      ${muted(esc(props.map((p) => p.municipality).filter(Boolean).join(', ') || 'Sin propiedad') + ` · ${wbc} cuerpo(s) de agua · ${feeLabel(c)}`, 'mt-s')}${muted('Envío: ' + esc(prefText(c)))}${muted('Días de servicio: ' + esc(daysText(c)))}</div>`;
+      ${muted(esc(props.map((p) => p.municipality).filter(Boolean).join(', ') || 'Sin propiedad') + ` · ${wbc} cuerpo(s) de agua · ${feeLabel(c)}`, 'mt-s')}${muted('Envío: ' + esc(prefText(c)))}${muted('Días de servicio: ' + esc(clientDaysText(c)))}</div>`;
   }).join('') + '</div>' : empty(T('clients').length ? 'No hay clientes en esta vista.' : 'Aún no tienes clientes. Toca «+ Nuevo» para agregar el primero (puedes usar el GPS estando frente a la casa).');
   return { title: 'Clientes', sub: `${activeClients().length} activos`, right: btn('+ Nuevo', 'newClient', {}, 'sm'), body: h };
 }
@@ -322,13 +333,13 @@ function clientView(id) {
   if (!c) return { title: '—', body: empty('Cliente no encontrado.') };
   let h = `<div class="card"><div>📞 ${esc(c.phone || '—')}</div><div>✉️ ${esc(c.email || '—')}</div><div>💵 ${feeLabel(c)}</div><div class="mt-s">${seg(c.fee_type || 'MONTHLY', [['MONTHLY', 'Cobro mensual'], ['PER_SERVICE', 'Por servicio']], 'setPref', { id: c.id, f: 'fee_type' })}</div>${c.notes ? muted(esc(c.notes), 'mt-s') : ''}${c.tags.length ? muted('Etiquetas: ' + esc(c.tags.join(', ')), 'mt-s') : ''}</div>
     <h2>Informe al cliente</h2><div class="card"><div class="chk"><span class="t">Mostrar hora de llegada y salida en el informe</span><label class="sw"><input type="checkbox" data-cflag="hide_times" data-id="${c.id}"${c.hide_times ? '' : ' checked'}><i></i></label></div>${muted('Las horas siempre quedan guardadas en tu registro; esto solo decide si salen en el PDF y el texto que le envías a este cliente.')}</div>
-    <h2>Días de servicio</h2><div class="card"><div class="chips">${DAYS.map((n, i) => chip(DAYS_S[i], (c.service_days || []).includes(i), 'toggleClientDay', { id: c.id, d: i })).join('')}</div>${muted('Toca los días en que le das servicio. La ruta de cada día incluye a sus clientes.')}</div>
     <h2>Preferencias de envío guardadas</h2><div class="card">${muted('Canal predeterminado')}${seg(c.dispatch_channel_pref, CHANNELS, 'setPref', { id: c.id, f: 'dispatch_channel_pref' })}
     <div class="mt">${muted('Formato predeterminado')}</div>${seg(c.dispatch_format_pref, FORMATS, 'setPref', { id: c.id, f: 'dispatch_format_pref' })}
     ${muted('Se guarda al instante. Los informes y facturas se envían con estas opciones en 1 solo toque.', 'mt')}</div>
     <div class="row between"><h2>Propiedades</h2>${btn('+ Propiedad', 'newProp', { c: c.id }, 'sm ghost')}</div>`;
   T('properties').filter((p) => p.client_id === c.id).forEach((p) => {
     h += `<div class="card"><b>${esc(p.address)}</b>${muted(esc(p.municipality) + ' · Portón: ' + esc(p.gate_code || 'sin código'))}${p.access_notes ? muted(esc(p.access_notes)) : ''}
+      <div class="mt-s"><b style="font-size:13px">Días de servicio de esta propiedad</b><div class="chips mt-s">${DAYS.map((n, i) => chip(DAYS_S[i], (p.service_days || []).includes(i), 'togglePropDay', { id: p.id, d: i })).join('')}</div></div>
       <div class="btns">${btn('Editar', 'editProp', { id: p.id, c: c.id }, 'sm ghost')}${btn('🗑', 'delProp', { id: p.id }, 'sm ghost')}${btn('+ Cuerpo de agua', 'newWb', { p: p.id }, 'sm')}</div>`;
     T('waterBodies').filter((w) => w.property_id === p.id).forEach((w) => {
       h += `<div class="mt" style="padding-left:12px;border-left:3px solid ${COL.water}"><b>💧 ${esc(w.name)}</b> ${muted('· ' + w.gallons.toLocaleString('es-PR') + ' gal')}
@@ -345,14 +356,14 @@ function clientView(id) {
 /* formularios genéricos (hoja inferior) */
 const CLIENT_F = [
   { k: 'name', l: 'Nombre', req: 1 }, { k: 'phone', l: 'Teléfono (WhatsApp)', t: 'tel', ph: '787-555-0100' }, { k: 'email', l: 'Email', t: 'email' },
-  { k: 'fee_type', l: 'Tipo de cobro', t: 'choice', o: [['MONTHLY', 'Mensual'], ['PER_SERVICE', 'Por servicio']] }, { k: 'monthly_fee', l: 'Monto ($): por mes o por cada visita', t: 'number' }, { k: 'tags', l: 'Etiquetas (separadas por coma)', ph: 'Caguas, Residencial' }, { k: 'service_days', l: 'Días de servicio (puedes marcar varios)', t: 'days' },
+  { k: 'fee_type', l: 'Tipo de cobro', t: 'choice', o: [['MONTHLY', 'Mensual'], ['PER_SERVICE', 'Por servicio']] }, { k: 'monthly_fee', l: 'Monto ($): por mes o por cada visita', t: 'number' }, { k: 'tags', l: 'Etiquetas (separadas por coma)', ph: 'Caguas, Residencial' },
   { k: 'channel', l: 'Canal de envío predeterminado', t: 'choice', o: CHANNELS }, { k: 'format', l: 'Formato de envío predeterminado', t: 'choice', o: FORMATS }, { k: 'notes', l: 'Notas', t: 'area' },
 ];
 const PROP_F = [
-  { k: 'address', l: 'Dirección', req: 1 }, { k: 'municipality', l: 'Municipio / zona', ph: 'Caguas, San Juan, Guaynabo, Dorado, Montehiedra…' }, { k: 'gate_code', l: 'Código de portón' },
+  { k: 'address', l: 'Dirección', req: 1 }, { k: 'municipality', l: 'Municipio / zona', ph: 'Caguas, San Juan, Guaynabo, Dorado, Montehiedra…' }, { k: 'gate_code', l: 'Código de portón' }, { k: 'service_days', l: 'Días de servicio de esta propiedad (puedes marcar varios)', t: 'days' },
   { k: 'access_notes', l: 'Notas de acceso (mascotas, cuarto de bombas)', t: 'area' }, { k: 'gps', t: 'gps' }, { k: 'lat', l: 'Latitud', t: 'number', ph: '18.2341' }, { k: 'lng', l: 'Longitud', t: 'number', ph: '-66.0485' },
 ];
-const NEWCLIENT_PROP_F = [{ k: 'address', l: 'Dirección de la propiedad (opcional)' }, { k: 'municipality', l: 'Municipio / zona', ph: 'Caguas, San Juan, Guaynabo, Dorado…' }, { k: 'gate_code', l: 'Código de portón' }, { k: 'gps', t: 'gps' }, { k: 'lat', l: 'Latitud', t: 'number' }, { k: 'lng', l: 'Longitud', t: 'number' }];
+const NEWCLIENT_PROP_F = [{ k: 'address', l: 'Dirección de la propiedad (opcional)' }, { k: 'municipality', l: 'Municipio / zona', ph: 'Caguas, San Juan, Guaynabo, Dorado…' }, { k: 'gate_code', l: 'Código de portón' }, { k: 'service_days', l: 'Días de servicio de esta propiedad', t: 'days' }, { k: 'gps', t: 'gps' }, { k: 'lat', l: 'Latitud', t: 'number' }, { k: 'lng', l: 'Longitud', t: 'number' }];
 const WB_F = [{ k: 'name', l: 'Nombre', req: 1, ph: 'Piscina Principal, Jacuzzi, Espejo de Agua' }, { k: 'type', l: 'Tipo', t: 'choice', o: [['Pool', 'Piscina'], ['Jacuzzi', 'Jacuzzi'], ['Commercial', 'Comercial']] }, { k: 'gallons', l: 'Volumen (galones)', t: 'number', req: 1 }];
 const EQ_F = [{ k: 'category', l: 'Categoría', req: 1, ph: 'Bomba, Filtro, Calentador, Clorador salino, Automatización' }, { k: 'brand', l: 'Marca' }, { k: 'model', l: 'Modelo' }, { k: 'serial_number', l: 'Serial' }, { k: 'status', l: 'Estado', t: 'choice', o: [['OK', 'OK'], ['Atención', 'Atención'], ['Averiado', 'Averiado']] }];
 
@@ -371,7 +382,7 @@ function formFieldHtml(f, val) {
 function openForm(kind, id, parent) {
   const defs = { client: [CLIENT_F, 'cliente'], prop: [PROP_F, 'propiedad'], wb: [WB_F, 'cuerpo de agua'], equip: [EQ_F, 'equipo'] }[kind];
   let v = {};
-  if (kind === 'client') { const c = id && find('clients', id); v = c ? { name: c.name, phone: c.phone, email: c.email, fee_type: c.fee_type || 'MONTHLY', monthly_fee: c.monthly_fee, tags: c.tags.join(', '), service_days: (c.service_days || []).join(','), channel: c.dispatch_channel_pref, format: c.dispatch_format_pref, notes: c.notes } : { channel: 'WHATSAPP', format: 'TEXT', fee_type: 'MONTHLY', monthly_fee: 0 }; }
+  if (kind === 'client') { const c = id && find('clients', id); v = c ? { name: c.name, phone: c.phone, email: c.email, fee_type: c.fee_type || 'MONTHLY', monthly_fee: c.monthly_fee, tags: c.tags.join(', '), channel: c.dispatch_channel_pref, format: c.dispatch_format_pref, notes: c.notes } : { channel: 'WHATSAPP', format: 'TEXT', fee_type: 'MONTHLY', monthly_fee: 0 }; }
   if (kind === 'prop') { const p = id && find('properties', id); v = p ? { ...p } : {}; }
   if (kind === 'wb') { const w = id && find('waterBodies', id); v = w ? { ...w } : { type: 'Pool' }; }
   if (kind === 'equip') { const e = id && find('equipment', id); v = e ? { ...e } : { status: 'OK' }; }
@@ -379,6 +390,7 @@ function openForm(kind, id, parent) {
   UI.form = { kind, id, parent, fields };
   openSheet(`${id ? 'Editar' : 'Nuevo'} ${defs[1]}`, `<form id="frm" onsubmit="return false">${fields.map((f) => formFieldHtml(f, v[f.k])).join('')}${btn('Guardar', 'submitForm')}</form>`);
 }
+const daysOf = (str) => String(str || '').split(',').filter((x) => x !== '').map(Number).sort();
 function submitForm() {
   const F = UI.form, g = (k) => { const el = document.querySelector(`#frm [name="${k}"]`); return el ? el.value.trim() : ''; };
   if (!F) return;
@@ -387,13 +399,13 @@ function submitForm() {
   if (F.kind === 'client') {
     const old = F.id && find('clients', F.id);
     const cid = old ? old.id : uid('c');
-    upsert('clients', { id: cid, name: g('name'), phone: g('phone'), email: g('email'), dispatch_channel_pref: g('channel') || 'WHATSAPP', dispatch_format_pref: g('format') || 'TEXT', status: old ? old.status : 'ACTIVE', notes: g('notes'), fee_type: g('fee_type') === 'PER_SERVICE' ? 'PER_SERVICE' : 'MONTHLY', monthly_fee: toNum(g('monthly_fee')) || 0, tags: g('tags').split(',').map((t) => t.trim()).filter(Boolean), service_days: g('service_days').split(',').filter((x) => x !== '').map(Number).sort() });
+    upsert('clients', { id: cid, name: g('name'), phone: g('phone'), email: g('email'), dispatch_channel_pref: g('channel') || 'WHATSAPP', dispatch_format_pref: g('format') || 'TEXT', status: old ? old.status : 'ACTIVE', notes: g('notes'), fee_type: g('fee_type') === 'PER_SERVICE' ? 'PER_SERVICE' : 'MONTHLY', monthly_fee: toNum(g('monthly_fee')) || 0, tags: g('tags').split(',').map((t) => t.trim()).filter(Boolean) });
     if (!old && (g('address') || g('lat'))) {
-      upsert('properties', { id: uid('p'), client_id: cid, address: g('address') || 'Sin dirección', municipality: g('municipality'), gate_code: g('gate_code'), access_notes: '', lat: toNum(g('lat')) ?? DEPOT.lat, lng: toNum(g('lng')) ?? DEPOT.lng });
+      upsert('properties', { id: uid('p'), client_id: cid, address: g('address') || 'Sin dirección', municipality: g('municipality'), gate_code: g('gate_code'), access_notes: '', service_days: daysOf(g('service_days')), lat: toNum(g('lat')) ?? DEPOT.lat, lng: toNum(g('lng')) ?? DEPOT.lng });
     }
   } else if (F.kind === 'prop') {
     const old = F.id && find('properties', F.id);
-    upsert('properties', { id: old ? old.id : uid('p'), client_id: old ? old.client_id : F.parent, address: g('address'), municipality: g('municipality'), gate_code: g('gate_code'), access_notes: g('access_notes'), lat: toNum(g('lat')) ?? DEPOT.lat, lng: toNum(g('lng')) ?? DEPOT.lng });
+    upsert('properties', { id: old ? old.id : uid('p'), client_id: old ? old.client_id : F.parent, address: g('address'), municipality: g('municipality'), gate_code: g('gate_code'), access_notes: g('access_notes'), service_days: daysOf(g('service_days')), lat: toNum(g('lat')) ?? DEPOT.lat, lng: toNum(g('lng')) ?? DEPOT.lng });
   } else if (F.kind === 'wb') {
     const old = F.id && find('waterBodies', F.id);
     upsert('waterBodies', { id: old ? old.id : uid('w'), property_id: old ? old.property_id : F.parent, name: g('name'), type: g('type') || 'Pool', gallons: Math.round(toNum(g('gallons')) || 0) });
@@ -542,7 +554,7 @@ const AREAS = ['Caguas', 'San Juan', 'Guaynabo', 'Dorado', 'Montehiedra', 'Comer
 
 function msgRecipients() {
   const a = UI.msg.area.toLowerCase(), di = DAYS.indexOf(UI.msg.area);
-  return activeClients().filter((c) => UI.msg.area === 'ALL' || T('properties').some((p) => p.client_id === c.id && p.municipality.toLowerCase() === a) || c.tags.some((t) => t.toLowerCase() === a) || (di >= 0 && (c.service_days || []).includes(di)));
+  return activeClients().filter((c) => UI.msg.area === 'ALL' || T('properties').some((p) => p.client_id === c.id && p.municipality.toLowerCase() === a) || c.tags.some((t) => t.toLowerCase() === a) || (di >= 0 && T('properties').some((p) => p.client_id === c.id && (p.service_days || []).includes(di))));
 }
 const backupBlob = () => new Blob([JSON.stringify({ app: 'elite-pool-pwa', format: 1, exported_at: new Date().toISOString(), db: S.db, settings: S.settings })], { type: 'application/json' });
 const backupStale = () => !S.lastBackup || Date.now() - new Date(S.lastBackup).getTime() > 7 * 864e5;
@@ -553,8 +565,7 @@ async function restoreBackup(file) {
   if (!data || data.app !== 'elite-pool-pwa' || !data.db || !Array.isArray(data.db.clients)) return alert('Ese archivo no es un respaldo de Elite Pool Service PR.');
   const n = data.db.clients.length;
   if (!confirm(`Se reemplazarán TODOS los datos actuales por el respaldo (${n} cliente(s), guardado el ${fmtDateTime(data.exported_at)}). ¿Continuar?`)) return;
-  TABLES.forEach((t) => { if (!Array.isArray(data.db[t])) data.db[t] = []; });
-  S.db = data.db; S.settings = mergeSettings(data.settings); S.queue = []; S.demoPurged = true; UI.drafts = {}; UI.view = null;
+  S.db = migrateDb(data.db); S.settings = mergeSettings(data.settings); S.queue = []; S.demoPurged = true; UI.drafts = {}; UI.view = null;
   persist(); render(); toast(`Respaldo restaurado: ${n} cliente(s)`);
 }
 function msgTab() {
@@ -820,11 +831,11 @@ const A = {
   createRoute: (d) => {
     const date = routeDate(), rid = uid('r');
     upsert('routes', { id: rid, date, technician_id: ME, status: 'PLANNED' });
-    const n = addStopsFor(rid, d.all === '1' ? activeClients() : scheduledFor(date), 0);
+    const n = addStopsFor(rid, d.all === '1' ? activeProps() : scheduledProps(date), 0);
     toast(n ? `Ruta creada con ${n} parada(s)` : 'Ruta creada sin paradas');
   },
   addMissing: () => {
-    const r = curRoute(), n = addStopsFor(r.id, scheduledFor(routeDate()), routeStops(r).length);
+    const r = curRoute(), n = addStopsFor(r.id, scheduledProps(routeDate()), routeStops(r).length);
     toast(`${n} parada(s) añadidas`);
   },
   setRouteDate: (d) => { UI.routeDate = d.v === todayISO() ? null : d.v; UI.map = null; render(); },
@@ -833,9 +844,9 @@ const A = {
     const wrap = el.parentElement, hid = wrap.previousElementSibling;
     hid.value = [...wrap.querySelectorAll('.chip.on')].map((b) => b.dataset.v).join(',');
   },
-  toggleClientDay: (d) => {
-    const c = find('clients', d.id), n = +d.d, cur = c.service_days || [];
-    upsert('clients', { ...c, service_days: cur.includes(n) ? cur.filter((x) => x !== n) : [...cur, n].sort() });
+  togglePropDay: (d) => {
+    const p = find('properties', d.id), n = +d.d, cur = p.service_days || [];
+    upsert('properties', { ...p, service_days: cur.includes(n) ? cur.filter((x) => x !== n) : [...cur, n].sort() });
   },
   optimize: () => {
     const stops = routeStops(curRoute()), fixed = stops.filter((s) => s.status !== 'PENDING'), pend = stops.filter((s) => s.status === 'PENDING');
@@ -1073,7 +1084,7 @@ async function boot() {
   setupBack(); setupAutoLock();
   try {
     const saved = await idbGet('state');
-    if (saved && saved.db) { S.db = saved.db; S.queue = saved.queue || []; S.lastSync = saved.lastSync || null; S.settings = mergeSettings(saved.settings); S.demoPurged = !!saved.demoPurged; S.lastBackup = saved.lastBackup || null; S.lock = saved.lock || null; if (S.lock) { UI.locked = true; UI.pin = ''; } TABLES.forEach((t) => { if (!S.db[t]) S.db[t] = []; }); S.db.clients.forEach((c) => { if (!Array.isArray(c.service_days)) c.service_days = SAMPLE_DAYS[c.id] || []; }); }
+    if (saved && saved.db) { S.db = saved.db; S.queue = saved.queue || []; S.lastSync = saved.lastSync || null; S.settings = mergeSettings(saved.settings); S.demoPurged = !!saved.demoPurged; S.lastBackup = saved.lastBackup || null; S.lock = saved.lock || null; if (S.lock) { UI.locked = true; UI.pin = ''; } migrateDb(S.db); }
   } catch (e) { /* IndexedDB no disponible: se usan datos de ejemplo en memoria */ }
   if (!S.db) { S.db = emptyDb(); S.demoPurged = true; }
   if (!S.demoPurged) { purgeDemo(); S.demoPurged = true; persist(); }
