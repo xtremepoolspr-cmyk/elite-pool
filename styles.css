@@ -98,3 +98,15 @@ a{color:var(--water);font-weight:600;text-decoration:none}
 .dot{position:absolute;width:28px;height:28px;margin:-14px 0 0 -14px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:12px;border:2px solid #fff}
 .stamp{font-size:11px;color:var(--muted)}
 .toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:var(--slate);color:#fff;padding:10px 16px;border-radius:20px;font-size:14px;z-index:60;max-width:90%}
+
+/* pantalla de bloqueo */
+.lockscr{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;background:var(--slate);color:#fff;text-align:center;overflow-y:auto}
+.lockscr h1{font-size:22px;margin:6px 0 4px}.lockscr .muted{color:#94a3b8}
+.lk-ic{font-size:44px}
+.dots{display:flex;gap:14px;margin:22px 0 6px;min-height:16px}
+.dots i{width:16px;height:16px;border-radius:50%;border:2px solid #64748b}.dots i.on{background:var(--water);border-color:var(--water)}
+.lk-err{min-height:20px;font-size:13px;color:#fca5a5;margin-bottom:10px}
+.keypad{display:grid;grid-template-columns:repeat(3,76px);gap:14px}
+.keypad button{height:76px;border-radius:50%;background:#1e293b;color:#fff;font-size:28px;font-weight:600}
+.keypad button:active{background:var(--water)}.keypad button[disabled]{opacity:.35}
+.lk-help{margin-top:22px;font-size:12px;color:#94a3b8;max-width:320px}.lk-help summary{cursor:pointer}
