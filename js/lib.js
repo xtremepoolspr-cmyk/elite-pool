@@ -433,7 +433,7 @@ function buildStopDoc(db, stopId, cfgIn) {
 
   // ---- texto (WhatsApp / correo) ----
   let text = `🏊 *${cfg.biz.name}* — Informe de servicio\nCliente: ${client.name}\nDirección: ${prop.address}\nFecha: ${date}\n`;
-  if (o.times) text += `Horario: ${fmtTime(stop.check_in_time)} – ${fmtTime(stop.check_out_time)}\n`;
+  if (o.times && !client.hide_times) text += `Horario: ${fmtTime(stop.check_in_time)} – ${fmtTime(stop.check_out_time)}\n`;
   if (tech) text += `Técnico: ${tech}\n`;
   // ---- PDF ----
   const L = [];
@@ -441,7 +441,7 @@ function buildStopDoc(db, stopId, cfgIn) {
     L.push({ t: 'DATOS DEL SERVICIO', size: 8.5, b: true, c: GREY }, kv('Cliente', client.name), kv('Dirección', `${prop.address}, ${prop.municipality}`));
     if (client.phone) L.push(kv('Teléfono', client.phone));
     L.push(kv('Fecha', date));
-    if (o.times) L.push(kv('Horario', `Entrada ${fmtTime(stop.check_in_time)} · Salida ${fmtTime(stop.check_out_time)}`));
+    if (o.times && !client.hide_times) L.push(kv('Horario', `Entrada ${fmtTime(stop.check_in_time)} · Salida ${fmtTime(stop.check_out_time)}`));
     if (tech) L.push(kv('Técnico', tech));
     L.push({ space: 6 });
   }

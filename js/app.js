@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v10 · Clave de acceso';
+const APP_VERSION = 'v11 · Horas opcionales';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -321,6 +321,7 @@ function clientView(id) {
   const c = find('clients', id);
   if (!c) return { title: '—', body: empty('Cliente no encontrado.') };
   let h = `<div class="card"><div>📞 ${esc(c.phone || '—')}</div><div>✉️ ${esc(c.email || '—')}</div><div>💵 ${feeLabel(c)}</div><div class="mt-s">${seg(c.fee_type || 'MONTHLY', [['MONTHLY', 'Cobro mensual'], ['PER_SERVICE', 'Por servicio']], 'setPref', { id: c.id, f: 'fee_type' })}</div>${c.notes ? muted(esc(c.notes), 'mt-s') : ''}${c.tags.length ? muted('Etiquetas: ' + esc(c.tags.join(', ')), 'mt-s') : ''}</div>
+    <h2>Informe al cliente</h2><div class="card"><div class="chk"><span class="t">Mostrar hora de llegada y salida en el informe</span><label class="sw"><input type="checkbox" data-cflag="hide_times" data-id="${c.id}"${c.hide_times ? '' : ' checked'}><i></i></label></div>${muted('Las horas siempre quedan guardadas en tu registro; esto solo decide si salen en el PDF y el texto que le envías a este cliente.')}</div>
     <h2>Días de servicio</h2><div class="card"><div class="chips">${DAYS.map((n, i) => chip(DAYS_S[i], (c.service_days || []).includes(i), 'toggleClientDay', { id: c.id, d: i })).join('')}</div>${muted('Toca los días en que le das servicio. La ruta de cada día incluye a sus clientes.')}</div>
     <h2>Preferencias de envío guardadas</h2><div class="card">${muted('Canal predeterminado')}${seg(c.dispatch_channel_pref, CHANNELS, 'setPref', { id: c.id, f: 'dispatch_channel_pref' })}
     <div class="mt">${muted('Formato predeterminado')}</div>${seg(c.dispatch_format_pref, FORMATS, 'setPref', { id: c.id, f: 'dispatch_format_pref' })}
@@ -1026,6 +1027,7 @@ async function onChange(e) {
     const tbl = t.dataset.chk === 'stop' ? 'stops' : 'workOrders', row = find(tbl, t.dataset.owner);
     upsert(tbl, { ...row, checklist: row.checklist.map((c) => (c.id === t.dataset.id ? { ...c, done: t.checked } : c)) });
   } else if (t.dataset.restore && t.files && t.files[0]) { const f = t.files[0]; t.value = ''; restoreBackup(f);
+  } else if (t.dataset.cflag) { const c = find('clients', t.dataset.id); if (c) upsert('clients', { ...c, [t.dataset.cflag]: !t.checked });
   } else if (t.dataset.set) { setPath(S.settings, t.dataset.set, t.checked); persist(); }
   else if (t.dataset.note) { const row = find('stops', t.dataset.note); if (row) upsert('stops', { ...row, client_note: t.value }); }
   else if (t.dataset.logo && t.files && t.files[0]) {
