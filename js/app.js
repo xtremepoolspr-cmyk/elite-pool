@@ -5,7 +5,7 @@ const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verd
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
 
-const S = { db: null, queue: [], lastSync: null };
+const S = { db: null, queue: [], lastSync: null, settings: mergeSettings(null) };
 const UI = {
   tab: 'routes', view: null, q: '', clientFilter: 'ACTIVE', orderFilter: 'ALL', shop: { status: 'ALL', tech: 'ALL', client: 'ALL' },
   invFilter: 'ALL', chem: { clientId: '', wbId: '', gal: '', n: 0 }, drafts: {}, form: null, dispatch: null, simOffline: false,
@@ -21,7 +21,7 @@ const idb = () => new Promise((res, rej) => { const r = indexedDB.open('epspr', 
 const idbGet = async (k) => { const d = await idb(); return new Promise((res) => { const q = d.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(undefined); }); };
 const idbSet = async (k, v) => { const d = await idb(); return new Promise((res) => { const t = d.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(); t.onerror = () => res(); }); };
 let persistTimer = null;
-const persist = () => { clearTimeout(persistTimer); persistTimer = setTimeout(() => idbSet('state', { db: S.db, queue: S.queue, lastSync: S.lastSync }).catch(() => {}), 300); };
+const persist = () => { clearTimeout(persistTimer); persistTimer = setTimeout(() => idbSet('state', { db: S.db, queue: S.queue, lastSync: S.lastSync, settings: S.settings }).catch(() => {}), 300); };
 
 /* ---------- mutaciones + cola de sincronización ---------- */
 let renderQueued = false;
@@ -105,7 +105,29 @@ function toast(msg) {
    ===================================================================== */
 const ST_COLOR = { PENDING: COL.pending, IN_PROGRESS: COL.warn, DONE: COL.ok };
 const ST_LABEL = { PENDING: 'Pendiente', IN_PROGRESS: 'En progreso', DONE: 'Completada' };
-const todayRoute = () => T('routes').find((r) => r.date === todayISO() && r.technician_id === ME);
+const DAYS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+const DAYS_S = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+const routeDate = () => UI.routeDate || todayISO();
+const dow = (iso) => new Date(iso + 'T12:00:00').getDay();
+const curRoute = () => T('routes').find((r) => r.date === routeDate() && r.technician_id === ME);
+const scheduledFor = (iso) => activeClients().filter((c) => (c.service_days || []).includes(dow(iso)));
+const daysText = (c) => (c.service_days && c.service_days.length ? [...c.service_days].sort().map((d) => DAYS_S[d]).join(', ') : 'sin días asignados');
+function addStopsFor(rid, clients, offset) {
+  const have = new Set(T('stops').filter((s) => s.route_id === rid).map((s) => s.property_id));
+  const props = T('properties').filter((p) => clients.some((c) => c.id === p.client_id) && !have.has(p.id));
+  const draft = props.map((p) => ({ id: uid('s'), route_id: rid, property_id: p.id, order_index: 0, check_in_time: null, check_out_time: null, check_in_lat: null, check_in_lng: null, status: 'PENDING', checklist: [], active_water_body_ids: T('waterBodies').filter((w) => w.property_id === p.id).slice(0, 1).map((w) => w.id) }));
+  const order = optimizeOrder(draft, T('properties'));
+  draft.forEach((s) => upsert('stops', { ...s, order_index: offset + order.indexOf(s.id), checklist: mkChecklist(s.id) }));
+  return draft.length;
+}
+function weekStrip() {
+  const d = routeDate(), start = addDays(d, -dow(d));
+  const chips = Array.from({ length: 7 }, (_, i) => {
+    const iso = addDays(start, i), has = T('routes').some((r) => r.date === iso && r.technician_id === ME);
+    return chip(`${DAYS_S[i]} ${+iso.slice(8)}${has ? ' •' : ''}`, iso === d, 'setRouteDate', { v: iso });
+  }).join('');
+  return `<div class="chips">${chips}</div><div class="btns" style="margin:0 0 12px">${btn('‹ Semana', 'setRouteDate', { v: addDays(d, -7) }, 'sm ghost')}${btn('Hoy', 'setRouteDate', { v: todayISO() }, 'sm ghost')}${btn('Semana ›', 'setRouteDate', { v: addDays(d, 7) }, 'sm ghost')}</div>`;
+}
 const routeStops = (r) => (r ? T('stops').filter((s) => s.route_id === r.id).sort((a, b) => a.order_index - b.order_index) : []);
 
 const mapPoints = (stops) => stops.map((s) => ({ s, p: find('properties', s.property_id) })).filter((x) => x.p);
@@ -130,7 +152,7 @@ function initMap() {
   if (UI.mapCleanup) { UI.mapCleanup(); UI.mapCleanup = null; }
   const el = document.getElementById('map');
   if (!el) return;
-  const pts = mapPoints(routeStops(todayRoute()));
+  const pts = mapPoints(routeStops(curRoute()));
   const w = el.clientWidth, h = el.clientHeight;
   if (!pts.length || !w) return;
   const key = pts.map((x) => x.p.id).join();
@@ -176,14 +198,24 @@ function initMap() {
 }
 
 function routesTab() {
-  const route = todayRoute(), stops = routeStops(route), done = stops.filter((s) => s.status === 'DONE').length;
-  const sub = route ? `${done} de ${stops.length} paradas completadas` : new Date().toLocaleDateString('es-PR', { weekday: 'long', day: 'numeric', month: 'long' });
+  const date = routeDate(), isToday = date === todayISO(), dn = DAYS[dow(date)];
+  const route = curRoute(), stops = routeStops(route), done = stops.filter((s) => s.status === 'DONE').length;
+  const title = isToday ? 'Ruta de hoy' : `Ruta del ${dn}`;
+  const sub = `${dn} ${fmtDate(date)}${route ? ` · ${done} de ${stops.length} completadas` : ''}`;
   const right = UI.installEvt ? btn('📲 Instalar', 'install', {}, 'sm') : '';
-  if (!route) return { title: 'Ruta de hoy', sub, right, body: `<div class="card">${empty('No hay ruta creada para hoy.')}${btn('Crear ruta de hoy con clientes activos', 'createRoute')}</div>` };
+  if (!route) {
+    const sched = scheduledFor(date);
+    return { title, sub, right, body: weekStrip() + `<div class="card">${sched.length
+      ? `<b>${sched.length} cliente(s) programados el ${dn}</b>${muted(esc(sched.map((c) => c.name).join(', ')))}<div class="mt"></div>${btn('Crear ruta del ' + dn, 'createRoute', { all: '0' })}`
+      : empty(`Ningún cliente tiene asignado el ${dn}. Asigna los días en la pestaña Clientes.`)}<div class="mt-s"></div>${btn('Crear ruta con todos los clientes activos', 'createRoute', { all: '1' }, 'ghost')}</div>` };
+  }
   const pending = stops.filter((s) => s.status !== 'DONE').map((s) => find('properties', s.property_id)).filter(Boolean);
   const url = routeUrl(pending);
-  let h = `<div class="progress"><i style="width:${stops.length ? (done / stops.length) * 100 : 0}%"></i></div>${mapHtml(stops)}`;
+  const inRoute = new Set(stops.map((s) => s.property_id));
+  const missing = scheduledFor(date).filter((c) => T('properties').some((p) => p.client_id === c.id && !inRoute.has(p.id)));
+  let h = weekStrip() + `<div class="progress"><i style="width:${stops.length ? (done / stops.length) * 100 : 0}%"></i></div>${mapHtml(stops)}`;
   h += `<div class="btns" style="margin:0 0 12px">${btn('↕ Optimizar ruta', 'optimize', {}, 'sm ghost')}${url ? `<a class="btn sm ghost" href="${esc(url)}" target="_blank" rel="noopener">🗺 Abrir en Mapas</a>` : ''}</div>`;
+  if (missing.length) h += `<div class="mb">${btn(`+ Añadir ${missing.length} cliente(s) programados que faltan`, 'addMissing', {}, 'ghost')}</div>`;
   h += '<div class="cols">' + stops.map((s) => {
     const p = find('properties', s.property_id), c = p && find('clients', p.client_id);
     if (!p || !c) return '';
@@ -192,11 +224,11 @@ function routesTab() {
       : btn('📤 Enviar informe', 'sendStop', { id: s.id }, 'sm ghost');
     return `<div class="card bar tap" style="border-left-color:${ST_COLOR[s.status]}" data-act="openStop" data-id="${s.id}">
       <div class="row"><div class="dot" style="position:static;margin:0;background:${ST_COLOR[s.status]}">${s.order_index + 1}</div>
-      <div class="grow"><b>${esc(c.name)}</b>${muted(esc(p.address + ', ' + p.municipality))}</div>${badge(ST_LABEL[s.status], ST_COLOR[s.status])}</div>
+      <div class="grow"><b>${esc(c.name)}</b>${muted(esc(p.address + ', ' + p.municipality))}${muted('Días: ' + esc(daysText(c)))}</div>${badge(ST_LABEL[s.status], ST_COLOR[s.status])}</div>
       ${s.check_in_time ? muted(`Entrada ${fmtTime(s.check_in_time)}${s.check_out_time ? ' · Salida ' + fmtTime(s.check_out_time) : ''}`, 'mt-s') : ''}
       <div class="mt">${actions}</div></div>`;
   }).join('') + '</div>';
-  return { title: 'Ruta de hoy', sub, right, body: h };
+  return { title, sub, right, body: h };
 }
 
 /* --- lecturas (compartido con pestaña Químicos) --- */
@@ -236,6 +268,7 @@ function stopView(id) {
   });
   h += '<h2>Lista de verificación</h2><div class="card">' + stop.checklist.map((c) => `<div class="chk"><span class="t ${c.done ? 'done' : ''}">${esc(c.label)}</span><label class="sw"><input type="checkbox" data-chk="stop" data-owner="${stop.id}" data-id="${c.id}"${c.done ? ' checked' : ''}><i></i></label></div>`).join('') + '</div>';
   h += '<h2>Fotos Antes / Después</h2>' + photoStrip('STOP', stop.id);
+  h += `<h2>Observaciones para el cliente</h2><div class="card"><textarea id="note_${stop.id}" data-note="${stop.id}" style="width:100%;min-height:84px;padding:10px 14px;border:1.5px solid var(--border);border-radius:12px" placeholder="Ej. Se limpió la canasta de la bomba. Se recomienda…">${esc(stop.client_note || '')}</textarea>${muted('Aparece en el informe PDF y en el texto enviado.', 'mt-s')}</div>`;
   const parts = T('shoppingItems').filter((i) => i.stop_id === stop.id);
   h += `<h2>Piezas requeridas</h2><div class="card">${parts.map((p) => `<div>• ${esc(p.item_name)} ${muted('(' + SHOP_LABEL[p.status] + ')')}</div>`).join('')}
     <div class="fld mt-s">${input('part_name', '', 'placeholder="Ej. O-ring de la tapa de la bomba"')}</div>${btn('+ Requerir pieza', 'addPart', { stop: stop.id }, 'sm ghost')}</div>`;
@@ -265,7 +298,7 @@ function clientsTab() {
     const props = T('properties').filter((p) => p.client_id === c.id);
     const wbc = T('waterBodies').filter((w) => props.some((p) => p.id === w.property_id)).length;
     return `<div class="card tap" data-act="openClient" data-id="${c.id}"><div class="row between"><b>${esc(c.name)}</b>${badge(c.status === 'ACTIVE' ? 'Activo' : 'Archivado', c.status === 'ACTIVE' ? COL.ok : COL.pending)}</div>
-      ${muted(esc(props.map((p) => p.municipality).filter(Boolean).join(', ') || 'Sin propiedad') + ` · ${wbc} cuerpo(s) de agua · ${money(c.monthly_fee)}/mes`, 'mt-s')}${muted('Envío: ' + esc(prefText(c)))}</div>`;
+      ${muted(esc(props.map((p) => p.municipality).filter(Boolean).join(', ') || 'Sin propiedad') + ` · ${wbc} cuerpo(s) de agua · ${money(c.monthly_fee)}/mes`, 'mt-s')}${muted('Envío: ' + esc(prefText(c)))}${muted('Días de servicio: ' + esc(daysText(c)))}</div>`;
   }).join('') + '</div>' : empty('No hay clientes en esta vista.');
   return { title: 'Clientes', sub: `${activeClients().length} activos`, right: btn('+ Nuevo', 'newClient', {}, 'sm'), body: h };
 }
@@ -274,6 +307,7 @@ function clientView(id) {
   const c = find('clients', id);
   if (!c) return { title: '—', body: empty('Cliente no encontrado.') };
   let h = `<div class="card"><div>📞 ${esc(c.phone || '—')}</div><div>✉️ ${esc(c.email || '—')}</div><div>💵 ${money(c.monthly_fee)} / mes</div>${c.notes ? muted(esc(c.notes), 'mt-s') : ''}${c.tags.length ? muted('Etiquetas: ' + esc(c.tags.join(', ')), 'mt-s') : ''}</div>
+    <h2>Días de servicio</h2><div class="card"><div class="chips">${DAYS.map((n, i) => chip(DAYS_S[i], (c.service_days || []).includes(i), 'toggleClientDay', { id: c.id, d: i })).join('')}</div>${muted('Toca los días en que le das servicio. La ruta de cada día incluye a sus clientes.')}</div>
     <h2>Preferencias de envío guardadas</h2><div class="card">${muted('Canal predeterminado')}${seg(c.dispatch_channel_pref, CHANNELS, 'setPref', { id: c.id, f: 'dispatch_channel_pref' })}
     <div class="mt">${muted('Formato predeterminado')}</div>${seg(c.dispatch_format_pref, FORMATS, 'setPref', { id: c.id, f: 'dispatch_format_pref' })}
     ${muted('Se guarda al instante. Los informes y facturas se envían con estas opciones en 1 solo toque.', 'mt')}</div>
@@ -296,7 +330,7 @@ function clientView(id) {
 /* formularios genéricos (hoja inferior) */
 const CLIENT_F = [
   { k: 'name', l: 'Nombre', req: 1 }, { k: 'phone', l: 'Teléfono (WhatsApp)', t: 'tel', ph: '787-555-0100' }, { k: 'email', l: 'Email', t: 'email' },
-  { k: 'monthly_fee', l: 'Cuota mensual ($)', t: 'number' }, { k: 'tags', l: 'Etiquetas (separadas por coma)', ph: 'Caguas, Residencial' },
+  { k: 'monthly_fee', l: 'Cuota mensual ($)', t: 'number' }, { k: 'tags', l: 'Etiquetas (separadas por coma)', ph: 'Caguas, Residencial' }, { k: 'service_days', l: 'Días de servicio (puedes marcar varios)', t: 'days' },
   { k: 'channel', l: 'Canal de envío predeterminado', t: 'choice', o: CHANNELS }, { k: 'format', l: 'Formato de envío predeterminado', t: 'choice', o: FORMATS }, { k: 'notes', l: 'Notas', t: 'area' },
 ];
 const PROP_F = [
@@ -307,6 +341,10 @@ const WB_F = [{ k: 'name', l: 'Nombre', req: 1, ph: 'Piscina Principal, Jacuzzi,
 const EQ_F = [{ k: 'category', l: 'Categoría', req: 1, ph: 'Bomba, Filtro, Calentador, Clorador salino, Automatización' }, { k: 'brand', l: 'Marca' }, { k: 'model', l: 'Modelo' }, { k: 'serial_number', l: 'Serial' }, { k: 'status', l: 'Estado', t: 'choice', o: [['OK', 'OK'], ['Atención', 'Atención'], ['Averiado', 'Averiado']] }];
 
 function formFieldHtml(f, val) {
+  if (f.t === 'days') {
+    const sel = String(val || '').split(',').filter((x) => x !== '');
+    return `<div class="fld"><label>${esc(f.l)}</label><input type="hidden" name="${f.k}" value="${esc(sel.join(','))}"><div class="chips">${DAYS.map((n, i) => `<button type="button" class="chip${sel.includes(String(i)) ? ' on' : ''}" data-act="toggleDay" data-v="${i}">${DAYS_S[i]}</button>`).join('')}</div></div>`;
+  }
   if (f.t === 'choice') return `<div class="fld"><label>${esc(f.l)}</label><input type="hidden" name="${f.k}" value="${esc(val || '')}"><div class="seg">${f.o.map(([v, l]) => `<button type="button" class="${v === val ? 'on' : ''}" data-act="pick" data-v="${esc(v)}">${esc(l)}</button>`).join('')}</div></div>`;
   const common = `name="${f.k}" value="${esc(val ?? '')}" placeholder="${esc(f.ph || '')}"`;
   const inner = f.t === 'area' ? `<textarea name="${f.k}">${esc(val ?? '')}</textarea>` : `<input ${common} ${f.t === 'number' ? 'inputmode="decimal"' : f.t === 'tel' ? 'type="tel"' : f.t === 'email' ? 'type="email"' : ''}>`;
@@ -315,7 +353,7 @@ function formFieldHtml(f, val) {
 function openForm(kind, id, parent) {
   const defs = { client: [CLIENT_F, 'cliente'], prop: [PROP_F, 'propiedad'], wb: [WB_F, 'cuerpo de agua'], equip: [EQ_F, 'equipo'] }[kind];
   let v = {};
-  if (kind === 'client') { const c = id && find('clients', id); v = c ? { name: c.name, phone: c.phone, email: c.email, monthly_fee: c.monthly_fee, tags: c.tags.join(', '), channel: c.dispatch_channel_pref, format: c.dispatch_format_pref, notes: c.notes } : { channel: 'WHATSAPP', format: 'TEXT', monthly_fee: 0 }; }
+  if (kind === 'client') { const c = id && find('clients', id); v = c ? { name: c.name, phone: c.phone, email: c.email, monthly_fee: c.monthly_fee, tags: c.tags.join(', '), service_days: (c.service_days || []).join(','), channel: c.dispatch_channel_pref, format: c.dispatch_format_pref, notes: c.notes } : { channel: 'WHATSAPP', format: 'TEXT', monthly_fee: 0 }; }
   if (kind === 'prop') { const p = id && find('properties', id); v = p ? { ...p } : {}; }
   if (kind === 'wb') { const w = id && find('waterBodies', id); v = w ? { ...w } : { type: 'Pool' }; }
   if (kind === 'equip') { const e = id && find('equipment', id); v = e ? { ...e } : { status: 'OK' }; }
@@ -329,7 +367,7 @@ function submitForm() {
   if (miss) { toast(`Falta: ${miss.l}`); return; }
   if (F.kind === 'client') {
     const old = F.id && find('clients', F.id);
-    upsert('clients', { id: old ? old.id : uid('c'), name: g('name'), phone: g('phone'), email: g('email'), dispatch_channel_pref: g('channel') || 'WHATSAPP', dispatch_format_pref: g('format') || 'TEXT', status: old ? old.status : 'ACTIVE', notes: g('notes'), monthly_fee: toNum(g('monthly_fee')) || 0, tags: g('tags').split(',').map((t) => t.trim()).filter(Boolean) });
+    upsert('clients', { id: old ? old.id : uid('c'), name: g('name'), phone: g('phone'), email: g('email'), dispatch_channel_pref: g('channel') || 'WHATSAPP', dispatch_format_pref: g('format') || 'TEXT', status: old ? old.status : 'ACTIVE', notes: g('notes'), monthly_fee: toNum(g('monthly_fee')) || 0, tags: g('tags').split(',').map((t) => t.trim()).filter(Boolean), service_days: g('service_days').split(',').filter((x) => x !== '').map(Number).sort() });
   } else if (F.kind === 'prop') {
     const old = F.id && find('properties', F.id);
     upsert('properties', { id: old ? old.id : uid('p'), client_id: old ? old.client_id : F.parent, address: g('address'), municipality: g('municipality'), gate_code: g('gate_code'), access_notes: g('access_notes'), lat: toNum(g('lat')) ?? DEPOT.lat, lng: toNum(g('lng')) ?? DEPOT.lng });
@@ -448,10 +486,11 @@ function invoiceView(id) {
     <h2>Desglose</h2><div class="card">${inv.lines.map((l) => `<div class="row between" style="padding:6px 0"><span>${l.kind === 'FEE' ? '🗓' : l.kind === 'PART' ? '🔧' : '📋'} ${esc(l.description)}</span><b>${money(l.amount)}</b></div>`).join('')}
     <div class="row between" style="border-top:1px solid var(--border);margin-top:6px;padding-top:8px"><b style="font-size:18px">Total</b><span class="amount">${money(inv.total_amount)}</span></div></div>
     <h2>Método de pago</h2>${seg(inv.payment_method, [['ATH_MOVIL', 'ATH Móvil'], ['CARD', 'Tarjeta'], ['STRIPE', 'Stripe'], ['TRANSFER', 'Transf.']], 'setPayment', { id: inv.id })}
-    <div class="card mt" style="background:#f0f9ff;border-color:${COL.water}">${inv.payment_method === 'ATH_MOVIL' ? `${muted('ATH Móvil Business')}<div class="big" style="color:${COL.water}">${ATH_BUSINESS_PHONE}</div>` : ''}<div class="mt-s">${esc(paymentInstructions(inv.payment_method))}</div></div>
+    <div class="card mt" style="background:#f0f9ff;border-color:${COL.water}">${inv.payment_method === 'ATH_MOVIL' ? `${muted('ATH Móvil Business')}${athUrl(S.settings) ? `<div class="mt-s"><a href="${esc(athUrl(S.settings))}" target="_blank" rel="noopener" style="word-break:break-all">${esc(athUrl(S.settings))}</a></div>` : ''}${S.settings.pay.athPhone ? `<div class="big" style="color:${COL.water}">${esc(S.settings.pay.athPhone)}</div>` : ''}${!athUrl(S.settings) && !S.settings.pay.athPhone ? muted('Aún no hay enlace ni número. Configúralo abajo.') : ''}` : ''}<div class="mt-s">${esc(paymentInstructions(inv.payment_method, S.settings))}</div></div>
+    <div class="mt"></div>${btn('🎨 Personalizar factura y logo', 'openPdfSettings', {}, 'ghost')}
     ${inv.status === 'DRAFT' ? btn('Eliminar borrador', 'delDraft', { id: inv.id }, 'sm danger') : ''}`;
   const footer = btn('📤 Enviar factura (preferencia del cliente)', 'sendInvoice', { id: inv.id }) + (inv.status !== 'PAID' ? btn('✓ Marcar como pagada', 'markPaid', { id: inv.id }, 'ok') : '');
-  return { title: `Factura ${inv.period}`, body: h, footer };
+  return { title: `Factura ${invNumber(inv, S.db)}`, body: h, footer };
 }
 function createInvoiceFor(c) {
   const period = todayISO().slice(0, 7);
@@ -474,21 +513,22 @@ const TEMPLATES = [
   { id: 'filtros', label: 'Mantenimiento de filtros', subject: 'Recordatorio de mantenimiento de filtros', body: `Hola {nombre}, le recordamos que es momento de la limpieza profunda del filtro de su piscina para mantener el agua cristalina y proteger su equipo. Responda este mensaje para coordinar la fecha.${SIGN}` },
   { id: 'custom', label: 'Mensaje libre', subject: 'Aviso de Elite Pool Service PR', body: 'Hola {nombre}, ' },
 ];
-const AREAS = ['Caguas', 'San Juan', 'Guaynabo', 'Dorado', 'Montehiedra', 'Comercial', 'Residencial'];
+const AREAS = ['Caguas', 'San Juan', 'Guaynabo', 'Dorado', 'Montehiedra', 'Comercial', 'Residencial', ...DAYS];
 
 function msgRecipients() {
-  const a = UI.msg.area.toLowerCase();
-  return activeClients().filter((c) => UI.msg.area === 'ALL' || T('properties').some((p) => p.client_id === c.id && p.municipality.toLowerCase() === a) || c.tags.some((t) => t.toLowerCase() === a));
+  const a = UI.msg.area.toLowerCase(), di = DAYS.indexOf(UI.msg.area);
+  return activeClients().filter((c) => UI.msg.area === 'ALL' || T('properties').some((p) => p.client_id === c.id && p.municipality.toLowerCase() === a) || c.tags.some((t) => t.toLowerCase() === a) || (di >= 0 && (c.service_days || []).includes(di)));
 }
 function msgTab() {
   const M = UI.msg, tpl = TEMPLATES.find((t) => t.id === M.tpl);
   if (M.subject === null) { M.subject = tpl.subject; M.body = tpl.body; }
   const act = activeClients(), combo = (ch, f) => act.filter((c) => c.dispatch_channel_pref === ch && c.dispatch_format_pref === f).length;
   const rec = msgRecipients();
-  let h = `<h2>Motor de envío híbrido</h2><div class="card">Cada informe y factura sale por el canal (WhatsApp / Email / Ambos) y en el formato (PDF / Texto / Ambos) guardados en la ficha del cliente.
+  let h = `<h2>Documentos PDF</h2><div class="card">Logo, datos del negocio y qué secciones salen en la factura y el informe.${S.settings.logo ? muted('Logo cargado ✓', 'mt-s') : ''}<div class="mt-s"></div>${btn('🎨 Personalizar PDF y logo', 'openPdfSettings', {}, 'ghost')}</div>
+    <h2>Motor de envío híbrido</h2><div class="card">Cada informe y factura sale por el canal (WhatsApp / Email / Ambos) y en el formato (PDF / Texto / Ambos) guardados en la ficha del cliente.
     ${muted('Clientes activos por preferencia', 'mt-s')}${['WHATSAPP', 'EMAIL', 'BOTH'].map((ch) => `<div>${{ WHATSAPP: 'WhatsApp', EMAIL: 'Email', BOTH: 'Ambos' }[ch]}: PDF ${combo(ch, 'PDF')} · Texto ${combo(ch, 'TEXT')} · Ambos ${combo(ch, 'BOTH')}</div>`).join('')}</div>
     <h2>Aviso masivo</h2>${muted('Plantilla', 'mb')}<div class="chips">${TEMPLATES.map((t) => chip(t.label, M.tpl === t.id, 'setTpl', { id: t.id })).join('')}</div>
-    ${muted('Audiencia (zona o etiqueta)', 'mb')}<div class="chips">${chip('Todos', M.area === 'ALL', 'setArea', { v: 'ALL' })}${AREAS.map((a) => chip(a, M.area === a, 'setArea', { v: a })).join('')}</div>
+    ${muted('Audiencia (zona, etiqueta o día de servicio)', 'mb')}<div class="chips">${chip('Todos', M.area === 'ALL', 'setArea', { v: 'ALL' })}${AREAS.map((a) => chip(a, M.area === a, 'setArea', { v: a })).join('')}</div>
     ${fld('Asunto (email)', input('m_subject', M.subject))}${fld('Mensaje ({nombre} se reemplaza por el nombre)', `<textarea id="m_body" style="min-height:140px">${esc(M.body)}</textarea>`)}
     <b>Destinatarios (${rec.length})</b><div class="mt-s"></div>`;
   h += rec.length ? rec.map((c) => `<div class="card"><div class="row"><div class="grow"><b>${M.sent[c.id] ? '✅ ' : ''}${esc(c.name)}</b>${muted(esc(prefText(c).split(' · ')[0]))}</div>${btn(M.sent[c.id] ? 'Reenviar' : 'Enviar', 'sendBroadcast', { id: c.id }, 'sm' + (M.sent[c.id] ? ' ghost' : ''))}</div></div>`).join('') : empty('Ningún cliente activo coincide con esta audiencia.');
@@ -544,7 +584,30 @@ function renderDispatch() {
    Shell, vistas y render
    ===================================================================== */
 const TAB_FN = { routes: routesTab, clients: clientsTab, chem: chemTab, orders: ordersTab, shop: shopTab, invoices: invoicesTab, msg: msgTab };
-const VIEW_FN = { stop: stopView, client: clientView, order: orderView, invoice: invoiceView };
+
+/* =====================================================================
+   Personalizar PDF (logo, datos del negocio y secciones)
+   ===================================================================== */
+const INV_OPTS = [['logo', 'Logo'], ['bizInfo', 'Datos del negocio (dirección, teléfono, correo)'], ['number', 'Número de factura'], ['dates', 'Fechas de emisión y vencimiento'], ['clientInfo', 'Datos del cliente'], ['itemType', 'Columna «Tipo» (servicio / pieza / orden)'], ['subtotals', 'Subtotales por categoría'], ['payBox', 'Recuadro del método de pago'], ['instructions', 'Instrucciones de pago'], ['terms', 'Términos y condiciones'], ['stamp', 'Sello PAGADA / VENCIDA'], ['footer', 'Pie de página']];
+const REP_OPTS = [['logo', 'Logo'], ['bizInfo', 'Datos del negocio'], ['clientBlock', 'Datos del cliente y visita'], ['times', 'Hora de entrada y salida'], ['tech', 'Nombre del técnico'], ['readings', 'Tabla de lecturas químicas'], ['ideal', 'Rango ideal'], ['previous', 'Lectura de la visita anterior'], ['summary', 'Resumen de alertas'], ['doses', 'Productos químicos aplicados'], ['equipment', 'Equipos de la piscina'], ['checklist', 'Trabajo realizado'], ['notes', 'Observaciones'], ['parts', 'Piezas requeridas'], ['photos', 'Fotos antes / después'], ['footer', 'Pie de página']];
+const getPath = (o, path) => path.split('.').reduce((a, k) => (a ? a[k] : undefined), o);
+const setPath = (o, path, v) => { const ks = path.split('.'), last = ks.pop(); let t = o; ks.forEach((k) => { t = t[k]; }); t[last] = v; };
+function pdfView() {
+  const st = S.settings, tgl = (grp, list) => list.map(([k, l]) => `<div class="chk"><span class="t">${esc(l)}</span><label class="sw"><input type="checkbox" data-set="${grp}.${k}"${st[grp][k] ? ' checked' : ''}><i></i></label></div>`).join('');
+  const tx = (path, label, ph = '') => fld(label, `<input data-setv="${path}" value="${esc(getPath(st, path) || '')}" placeholder="${esc(ph)}">`);
+  const body = `<h2>Logo</h2><div class="card">${st.logo ? `<div style="background:#fff;border:1px solid var(--border);border-radius:12px;padding:10px;text-align:center"><img src="${st.logo.data}" alt="Logo" style="max-width:100%;max-height:110px"></div><div class="btns"><label class="btn sm ghost">Cambiar logo<input type="file" accept="image/*" hidden data-logo="1"></label>${btn('Quitar', 'delLogo', {}, 'sm danger')}</div>` : `${muted('Sube tu logo (PNG o JPG). Se reduce y se guarda en el teléfono.')}<div class="mt-s"></div><label class="btn">📷 Subir logo<input type="file" accept="image/*" hidden data-logo="1"></label>`}
+    ${muted('El logo sale en la factura. En el informe de servicio se activa con su propio interruptor.', 'mt-s')}</div>
+    <h2>💳 Cobro con ATH Móvil Business</h2><div class="card">${fld('Enlace de pago ATH Móvil Business', `<input data-setv="pay.athLink" type="url" inputmode="url" autocapitalize="off" value="${esc(st.pay.athLink)}" placeholder="https://…">`)}${tx('pay.athPhone', 'Número ATH Móvil (opcional)', '939-405-7458')}${muted('Pega aquí tu enlace de ATH Móvil Business. Sale en la factura (PDF clicable y texto de WhatsApp) y en la pantalla de la factura. Si lo dejas vacío, solo se muestra el número.')}${st.pay.athLink ? `<div class="mt-s"><a href="${esc(athUrl(st))}" target="_blank" rel="noopener">Probar enlace ↗</a></div>` : ''}</div>
+    <h2>Datos del negocio</h2><div class="card">${tx('biz.name', 'Nombre')}${tx('biz.tagline', 'Lema (opcional)', 'Mantenimiento de piscinas')}${tx('biz.address', 'Dirección', 'Caguas, Puerto Rico')}${tx('biz.phone', 'Teléfono')}${tx('biz.email', 'Correo')}${tx('biz.regId', 'Registro / Núm. comerciante (opcional)')}${tx('biz.tech', 'Técnico por defecto (informe)')}</div>
+    <h2>🧾 Factura — qué incluir</h2><div class="card">${tgl('invoice', INV_OPTS)}
+    ${fld('Términos', `<textarea data-setv="invoice.termsText" style="min-height:70px">${esc(st.invoice.termsText)}</textarea>`)}${fld('Texto del pie', `<input data-setv="invoice.footerText" value="${esc(st.invoice.footerText)}">`)}</div>
+    <h2>📄 Informe de servicio — qué incluir</h2><div class="card">${tgl('report', REP_OPTS)}
+    ${fld('Texto del pie', `<input data-setv="report.footerText" value="${esc(st.report.footerText)}">`)}</div>
+    ${btn('Restaurar opciones originales', 'resetPdf', {}, 'sm ghost')}`;
+  const footer = `<div class="btns" style="margin-top:0">${btn('👁 Factura', 'previewPdf', { kind: 'invoice' })}${btn('👁 Informe', 'previewPdf', { kind: 'report' }, 'ghost')}</div>`;
+  return { title: 'Personalizar PDF', body, footer };
+}
+const VIEW_FN = { stop: stopView, client: clientView, order: orderView, invoice: invoiceView, pdf: pdfView };
 
 const bannerHtml = () => (!online() ? `<div class="banner off">Modo Offline Activo - Datos guardados localmente${S.queue.length ? ` (${S.queue.length} por sincronizar)` : ''}</div>` : S.queue.length ? `<div class="banner">${UI.syncing ? 'Sincronizando' : 'En cola de sincronización:'} ${S.queue.length} cambio(s)…</div>` : '');
 const page = (b) => `<div class="page" id="page">${b}</div>`;
@@ -586,6 +649,23 @@ function go(type, id) { UI.view = { type, id }; render(); }
    ===================================================================== */
 const A = {
   noop() {},
+  openPdfSettings: () => go('pdf', 'x'),
+  delLogo: () => { S.settings.logo = null; persist(); render(); },
+  resetPdf: () => { if (confirm('Se restauran las opciones de PDF (el logo y los datos del negocio se conservan).')) { const d = mergeSettings(null); S.settings.invoice = d.invoice; S.settings.report = d.report; persist(); render(); } },
+  previewPdf: async (d) => {
+    let doc = null;
+    if (d.kind === 'invoice') {
+      const inv = [...T('invoices')].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))[0], c = inv && find('clients', inv.client_id);
+      if (c) doc = buildInvoiceDoc(c, inv, S.settings, S.db);
+    } else {
+      const st = [...T('stops')].filter((x) => x.status !== 'PENDING').pop() || T('stops')[0];
+      if (st) doc = buildStopDoc(S.db, st.id, S.settings);
+    }
+    if (!doc) return toast(d.kind === 'invoice' ? 'Crea una factura primero para ver la vista previa.' : 'Crea una ruta con paradas para ver la vista previa.');
+    const blob = new Blob([buildPdf(doc.title, doc.lines, doc.opts)], { type: 'application/pdf' });
+    downloadBlob(blob, 'vista-previa-' + doc.fileName);
+    toast('Vista previa generada (revisa Descargas)');
+  },
   tab: (d) => { UI.tab = d.v; UI.view = null; render(); },
   back: () => { UI.view = null; render(); },
   closeSheet,
@@ -596,22 +676,35 @@ const A = {
   submitForm,
 
   /* rutas */
-  createRoute: () => {
-    const rid = uid('r');
-    upsert('routes', { id: rid, date: todayISO(), technician_id: ME, status: 'PLANNED' });
-    const draft = T('properties').filter((p) => (find('clients', p.client_id) || {}).status === 'ACTIVE').map((p, i) => ({ id: uid('s'), route_id: rid, property_id: p.id, order_index: i, check_in_time: null, check_out_time: null, check_in_lat: null, check_in_lng: null, status: 'PENDING', checklist: [], active_water_body_ids: T('waterBodies').filter((w) => w.property_id === p.id).slice(0, 1).map((w) => w.id) }));
-    const order = optimizeOrder(draft, T('properties'));
-    draft.forEach((s) => upsert('stops', { ...s, order_index: order.indexOf(s.id), checklist: mkChecklist(s.id) }));
+  createRoute: (d) => {
+    const date = routeDate(), rid = uid('r');
+    upsert('routes', { id: rid, date, technician_id: ME, status: 'PLANNED' });
+    const n = addStopsFor(rid, d.all === '1' ? activeClients() : scheduledFor(date), 0);
+    toast(n ? `Ruta creada con ${n} parada(s)` : 'Ruta creada sin paradas');
+  },
+  addMissing: () => {
+    const r = curRoute(), n = addStopsFor(r.id, scheduledFor(routeDate()), routeStops(r).length);
+    toast(`${n} parada(s) añadidas`);
+  },
+  setRouteDate: (d) => { UI.routeDate = d.v === todayISO() ? null : d.v; UI.map = null; render(); },
+  toggleDay: (d, el) => {
+    el.classList.toggle('on');
+    const wrap = el.parentElement, hid = wrap.previousElementSibling;
+    hid.value = [...wrap.querySelectorAll('.chip.on')].map((b) => b.dataset.v).join(',');
+  },
+  toggleClientDay: (d) => {
+    const c = find('clients', d.id), n = +d.d, cur = c.service_days || [];
+    upsert('clients', { ...c, service_days: cur.includes(n) ? cur.filter((x) => x !== n) : [...cur, n].sort() });
   },
   optimize: () => {
-    const stops = routeStops(todayRoute()), fixed = stops.filter((s) => s.status !== 'PENDING'), pend = stops.filter((s) => s.status === 'PENDING');
+    const stops = routeStops(curRoute()), fixed = stops.filter((s) => s.status !== 'PENDING'), pend = stops.filter((s) => s.status === 'PENDING');
     [...fixed.map((s) => s.id), ...optimizeOrder(pend, T('properties'))].forEach((id, i) => { const s = find('stops', id); if (s.order_index !== i) upsert('stops', { ...s, order_index: i }); });
     toast('Ruta optimizada por cercanía');
   },
   openStop: (d) => go('stop', d.id),
   startStop: async (d) => {
     toast('Registrando ubicación…');
-    const c = await getCoords(), s = find('stops', d.id), r = todayRoute();
+    const c = await getCoords(), s = find('stops', d.id), r = curRoute();
     upsert('stops', { ...s, status: 'IN_PROGRESS', check_in_time: new Date().toISOString(), check_in_lat: c ? c.lat : null, check_in_lng: c ? c.lng : null });
     if (r && r.status === 'PLANNED') upsert('routes', { ...r, status: 'IN_PROGRESS' });
     if (!c) toast('Check-in sin GPS (permiso denegado o sin señal)');
@@ -622,7 +715,7 @@ const A = {
     if (!hasR && !confirm('No guardaste lecturas químicas en esta parada. ¿Completar de todos modos?')) return;
     if (s.status !== 'DONE') {
       upsert('stops', { ...s, status: 'DONE', check_out_time: new Date().toISOString() });
-      const r = todayRoute();
+      const r = curRoute();
       if (r && routeStops(r).every((x) => x.status === 'DONE')) upsert('routes', { ...r, status: 'DONE' });
     }
     UI.view = null; render();
@@ -630,7 +723,7 @@ const A = {
   },
   sendStop: (d) => {
     const s = find('stops', d.id), p = find('properties', s.property_id);
-    openDispatch(p.client_id, 'REPORT', buildStopDoc(S.db, s.id));
+    openDispatch(p.client_id, 'REPORT', buildStopDoc(S.db, s.id, S.settings));
   },
   toggleWb: (d) => {
     const s = find('stops', d.stop), ids = s.active_water_body_ids.includes(d.wb) ? s.active_water_body_ids.filter((x) => x !== d.wb) : [...s.active_water_body_ids, d.wb];
@@ -733,7 +826,7 @@ const A = {
   markPaid: (d) => upsert('invoices', { ...find('invoices', d.id), status: 'PAID' }),
   sendInvoice: (d) => {
     const inv = find('invoices', d.id), c = find('clients', inv.client_id);
-    openDispatch(c.id, 'INVOICE', buildInvoiceDoc(c, inv), { after: () => { const cur = find('invoices', inv.id); if (cur && cur.status === 'DRAFT') upsert('invoices', { ...cur, status: 'SENT' }); } });
+    openDispatch(c.id, 'INVOICE', buildInvoiceDoc(c, inv, S.settings, S.db), { after: () => { const cur = find('invoices', inv.id); if (cur && cur.status === 'DRAFT') upsert('invoices', { ...cur, status: 'SENT' }); } });
   },
   delDraft: (d) => {
     const inv = find('invoices', d.id);
@@ -751,7 +844,7 @@ const A = {
   sendBroadcast: (d) => {
     const c = find('clients', d.id);
     if (!UI.msg.body.trim()) return toast('Escribe el mensaje');
-    openDispatch(c.id, 'BROADCAST', buildBroadcastDoc(c, UI.msg.body, UI.msg.subject), { forceFormat: 'TEXT', after: () => { UI.msg.sent[c.id] = true; scheduleRender(); } });
+    openDispatch(c.id, 'BROADCAST', buildBroadcastDoc(c, UI.msg.body, UI.msg.subject, S.settings), { forceFormat: 'TEXT', after: () => { UI.msg.sent[c.id] = true; scheduleRender(); } });
   },
 
   /* despacho */
@@ -781,6 +874,8 @@ function onInput(e) {
     if (sg) sg.innerHTML = sugHtml(key, +sg.dataset.gal, v, sg.dataset.stop ? { stop: sg.dataset.stop, wb: sg.dataset.wb } : null);
   } else if (t.id === 'cl_q') { UI.q = t.value; scheduleRender(); }
   else if (t.id === 'chem_gal') { UI.chem.gal = t.value; const sg = document.querySelector('[id^="sg_chem_"]'); if (sg) { const wb = find('waterBodies', UI.chem.wbId) || T('waterBodies').find((w) => T('properties').some((p) => p.id === w.property_id && p.client_id === UI.chem.clientId)); const gal = toNum(t.value) || (wb && wb.gallons) || 0; sg.dataset.gal = gal; sg.innerHTML = sugHtml(sg.id.slice(3), gal, draftOf(sg.id.slice(3), null), null); } }
+  else if (t.dataset.setv) { setPath(S.settings, t.dataset.setv, t.value); persist(); }
+  else if (t.dataset.note) { const row = find('stops', t.dataset.note); if (row) { row.client_note = t.value; persist(); } }
   else if (t.id === 'm_subject') UI.msg.subject = t.value;
   else if (t.id === 'm_body') UI.msg.body = t.value;
 }
@@ -789,6 +884,11 @@ async function onChange(e) {
   if (t.dataset.chk) { // checklist de parada u orden
     const tbl = t.dataset.chk === 'stop' ? 'stops' : 'workOrders', row = find(tbl, t.dataset.owner);
     upsert(tbl, { ...row, checklist: row.checklist.map((c) => (c.id === t.dataset.id ? { ...c, done: t.checked } : c)) });
+  } else if (t.dataset.set) { setPath(S.settings, t.dataset.set, t.checked); persist(); }
+  else if (t.dataset.note) { const row = find('stops', t.dataset.note); if (row) upsert('stops', { ...row, client_note: t.value }); }
+  else if (t.dataset.logo && t.files && t.files[0]) {
+    const f = t.files[0]; t.value = '';
+    try { S.settings.logo = await processLogo(f); persist(); render(); toast('Logo guardado'); } catch (err) { alert('No se pudo leer la imagen: ' + err.message); }
   } else if (t.dataset.sim) { UI.simOffline = t.checked; render(); maybeSync(); }
   else if (t.dataset.photo && t.files && t.files[0]) {
     const file = t.files[0], kind = t.dataset.photo, owner = t.dataset.owner, oid = t.dataset.id;
@@ -829,7 +929,7 @@ async function boot() {
   setupBack();
   try {
     const saved = await idbGet('state');
-    if (saved && saved.db) { S.db = saved.db; S.queue = saved.queue || []; S.lastSync = saved.lastSync || null; TABLES.forEach((t) => { if (!S.db[t]) S.db[t] = []; }); }
+    if (saved && saved.db) { S.db = saved.db; S.queue = saved.queue || []; S.lastSync = saved.lastSync || null; S.settings = mergeSettings(saved.settings); TABLES.forEach((t) => { if (!S.db[t]) S.db[t] = []; }); S.db.clients.forEach((c) => { if (!Array.isArray(c.service_days)) c.service_days = SAMPLE_DAYS[c.id] || []; }); }
   } catch (e) { /* IndexedDB no disponible: se usan datos de ejemplo en memoria */ }
   if (!S.db) S.db = seedDb(todayISO());
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
