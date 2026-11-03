@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v12 · Días por propiedad';
+const APP_VERSION = 'v13 · Calendario Airbnb';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -126,13 +126,14 @@ const dow = (iso) => new Date(iso + 'T12:00:00').getDay();
 const curRoute = () => T('routes').find((r) => r.date === routeDate() && r.technician_id === ME);
 const activeProps = () => { const ids = new Set(activeClients().map((c) => c.id)); return T('properties').filter((p) => ids.has(p.client_id)); };
 /** Los días de servicio son POR PROPIEDAD. */
-const scheduledProps = (iso) => activeProps().filter((p) => (p.service_days || []).includes(dow(iso)));
+const scheduledProps = (iso) => activeProps().filter((p) => (p.service_days || []).includes(dow(iso)) || (p.dates || []).some((x) => x.d === iso));
 const daysText = (o) => (o && o.service_days && o.service_days.length ? [...o.service_days].sort().map((d) => DAYS_S[d]).join(', ') : 'sin días asignados');
 const clientDaysText = (c) => { const u = new Set(); T('properties').filter((p) => p.client_id === c.id).forEach((p) => (p.service_days || []).forEach((d) => u.add(d))); return u.size ? [...u].sort().map((d) => DAYS_S[d]).join(', ') : 'sin días asignados'; };
 /** Datos viejos: los días que estaban en el cliente pasan a cada una de sus propiedades (una sola vez). */
 function migrateDb(db) {
   TABLES.forEach((t) => { if (!Array.isArray(db[t])) db[t] = []; });
   db.properties.forEach((p) => {
+    if (!Array.isArray(p.dates)) p.dates = [];
     if (!Array.isArray(p.service_days)) { const c = db.clients.find((x) => x.id === p.client_id); p.service_days = c && Array.isArray(c.service_days) ? [...c.service_days] : []; }
   });
   return db;
@@ -249,7 +250,7 @@ function routesTab() {
       : btn('📤 Enviar informe', 'sendStop', { id: s.id }, 'sm ghost');
     return `<div class="card bar tap" style="border-left-color:${ST_COLOR[s.status]}" data-act="openStop" data-id="${s.id}">
       <div class="row"><div class="dot" style="position:static;margin:0;background:${ST_COLOR[s.status]}">${s.order_index + 1}</div>
-      <div class="grow"><b>${esc(c.name)}</b>${muted(esc(p.address + ', ' + p.municipality))}${muted('Días: ' + esc(daysText(p)))}</div>${badge(ST_LABEL[s.status], ST_COLOR[s.status])}</div>
+      <div class="grow"><b>${esc(c.name)}</b>${muted(esc(p.address + ', ' + p.municipality))}${muted('Días: ' + esc(propDaysText(p)))}${(dateEntry(p, routeDate()) || {}).t ? `<div class="stamp" style="font-weight:700;color:${COL.water}">🕒 Servicio a las ${fmtHM(dateEntry(p, routeDate()).t)}</div>` : ''}</div>${badge(ST_LABEL[s.status], ST_COLOR[s.status])}</div>
       ${s.check_in_time ? muted(`Entrada ${fmtTime(s.check_in_time)}${s.check_out_time ? ' · Salida ' + fmtTime(s.check_out_time) : ''}`, 'mt-s') : ''}
       <div class="mt">${actions}</div></div>`;
   }).join('') + '</div>';
@@ -340,6 +341,7 @@ function clientView(id) {
   T('properties').filter((p) => p.client_id === c.id).forEach((p) => {
     h += `<div class="card"><b>${esc(p.address)}</b>${muted(esc(p.municipality) + ' · Portón: ' + esc(p.gate_code || 'sin código'))}${p.access_notes ? muted(esc(p.access_notes)) : ''}
       <div class="mt-s"><b style="font-size:13px">Días de servicio de esta propiedad</b><div class="chips mt-s">${DAYS.map((n, i) => chip(DAYS_S[i], (p.service_days || []).includes(i), 'togglePropDay', { id: p.id, d: i })).join('')}</div></div>
+      <div class="mt-s">${btn('📅 Airbnb / fechas específicas' + ((p.dates || []).length ? ` (${(p.dates || []).length})` : ''), 'openCal', { id: p.id }, 'sm ghost')}${(p.dates || []).filter((x) => x.d >= todayISO()).length ? muted('Próximas: ' + esc((p.dates || []).filter((x) => x.d >= todayISO()).slice(0, 4).map((x) => fmtDate(x.d).replace(/ \d{4}$/, '') + (x.t ? ' ' + fmtHM(x.t) : '')).join(' · ')) + ((p.dates || []).filter((x) => x.d >= todayISO()).length > 4 ? ' …' : ''), 'mt-s') : ''}</div>
       <div class="btns">${btn('Editar', 'editProp', { id: p.id, c: c.id }, 'sm ghost')}${btn('🗑', 'delProp', { id: p.id }, 'sm ghost')}${btn('+ Cuerpo de agua', 'newWb', { p: p.id }, 'sm')}</div>`;
     T('waterBodies').filter((w) => w.property_id === p.id).forEach((w) => {
       h += `<div class="mt" style="padding-left:12px;border-left:3px solid ${COL.water}"><b>💧 ${esc(w.name)}</b> ${muted('· ' + w.gallons.toLocaleString('es-PR') + ' gal')}
@@ -697,7 +699,7 @@ function openSheet(title, html, noReset) {
   $('#layer').innerHTML = `<div class="back-drop" data-act="closeSheet"></div><div class="sheet"><div class="sh"><b>${esc(title)}</b><button class="x" data-act="closeSheet">✕</button></div>${html}</div>`;
   if (!noReset) UI.dispatch = null;
 }
-function closeSheet() { $('#layer').innerHTML = ''; UI.dispatch = null; UI.form = null; }
+function closeSheet() { $('#layer').innerHTML = ''; UI.dispatch = null; UI.form = null; UI.cal = null; }
 const sheetOpen = () => !!($('#layer') && $('#layer').firstChild);
 function go(type, id) { UI.view = { type, id }; render(); }
 
@@ -756,8 +758,44 @@ function setupAutoLock() {
   });
 }
 
+/* =====================================================================
+   Fechas específicas (Airbnb / renta a corto plazo): calendario del mes
+   p.dates = [{ d: 'AAAA-MM-DD', t: 'HH:MM' | '' }]   (se suman a los días fijos de la semana)
+   ===================================================================== */
+const MONTHS = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+const fmtHM = (t) => { if (!t) return ''; const [h, m] = t.split(':').map(Number); return `${h % 12 || 12}:${pad2(m)} ${h < 12 ? 'a. m.' : 'p. m.'}`; };
+const dateEntry = (p, iso) => (p.dates || []).find((x) => x.d === iso);
+const propDaysText = (p) => { const w = (p.service_days || []).length ? daysText(p) : '', n = (p.dates || []).filter((x) => x.d >= todayISO()).length; return [w, n ? `${n} fecha(s) específicas` : ''].filter(Boolean).join(' · ') || 'sin días asignados'; };
+function calHtml() {
+  const C = UI.cal, p = C && find('properties', C.pid); if (!p) return '';
+  const iso = (d) => `${C.y}-${pad2(C.m + 1)}-${pad2(d)}`, dim = new Date(C.y, C.m + 1, 0).getDate(), lead = new Date(C.y, C.m, 1).getDay(), today = todayISO();
+  let cells = ''.padStart(0); for (let i = 0; i < lead; i++) cells += '<span></span>';
+  for (let d = 1; d <= dim; d++) { const on = !!dateEntry(p, iso(d)); cells += `<button class="cd${on ? ' on' : ''}${iso(d) === today ? ' td' : ''}" data-act="calDay" data-d="${iso(d)}">${d}</button>`; }
+  const mine = (p.dates || []).filter((x) => x.d.startsWith(`${C.y}-${pad2(C.m + 1)}`)).sort((a, b) => a.d.localeCompare(b.d));
+  return `${muted(esc(p.address))}
+    <div class="row between mt"><button class="btn sm ghost" data-act="calNav" data-v="-1">‹</button><b>${MONTHS[C.m]} ${C.y}</b><button class="btn sm ghost" data-act="calNav" data-v="1">›</button></div>
+    <div class="calw">${DAYS_S.map((x) => `<i>${x}</i>`).join('')}</div><div class="calg">${cells}</div>
+    ${muted('Toca los días en que se le da servicio. Toca otra vez para quitarlo.', 'mt-s')}
+    <div class="fld mt"><label>Hora para las fechas nuevas (opcional)</label><input type="time" id="cal_def" value="${esc(p.def_time || '')}"></div>
+    <b>Fechas de ${MONTHS[C.m].toLowerCase()} (${mine.length})</b>
+    ${mine.length ? mine.map((x) => `<div class="row mt-s"><span class="grow">${DAYS_S[new Date(x.d + 'T12:00:00').getDay()]} ${+x.d.slice(8)}</span><input type="time" data-caltime="${x.d}" value="${esc(x.t || '')}" style="min-height:44px;padding:6px 10px;border:1.5px solid var(--border);border-radius:10px"><button class="x" data-act="calDay" data-d="${x.d}" style="font-size:18px;color:var(--bad);padding:6px 10px">✕</button></div>`).join('') : muted('Aún no hay fechas este mes.', 'mt-s')}
+    ${mine.length ? `<div class="mt"></div>${btn('Quitar todas las de este mes', 'calClear', {}, 'sm ghost')}` : ''}`;
+}
+function openCal(pid) {
+  const d = new Date(); UI.cal = { pid, y: d.getFullYear(), m: d.getMonth() };
+  const p = find('properties', pid);
+  openSheet('📅 Airbnb / fechas específicas', '<div id="calbox"></div>');
+  const b = document.getElementById('calbox'); if (b) b.innerHTML = calHtml();
+}
+function renderCal() { const b = document.getElementById('calbox'); if (b) b.innerHTML = calHtml(); }
+function saveDates(p, dates) { upsert('properties', { ...p, dates: dates.sort((a, b) => a.d.localeCompare(b.d)) }); renderCal(); }
+
 const A = {
   noop() {},
+  openCal: (d) => openCal(d.id),
+  calNav: (d) => { const C = UI.cal; C.m += +d.v; if (C.m < 0) { C.m = 11; C.y--; } if (C.m > 11) { C.m = 0; C.y++; } renderCal(); },
+  calDay: (d) => { const p = find('properties', UI.cal.pid), has = dateEntry(p, d.d); saveDates(p, has ? p.dates.filter((x) => x.d !== d.d) : [...(p.dates || []), { d: d.d, t: p.def_time || '' }]); },
+  calClear: () => { const p = find('properties', UI.cal.pid), pre = `${UI.cal.y}-${pad2(UI.cal.m + 1)}`; saveDates(p, (p.dates || []).filter((x) => !x.d.startsWith(pre))); },
   lockNow,
   pinKey: (d) => { if (UI.checking || !S.lock) return; if (d.k === '⌫') UI.pin = UI.pin.slice(0, -1); else if (UI.pin.length < S.lock.len) UI.pin += d.k; UI.pinErr = ''; lockRender(); if (UI.pin.length === S.lock.len) tryPin(); },
   openPinSetup: () => pinSheet(S.lock ? 'change' : 'set'), openPinRemove: () => pinSheet('remove'),
@@ -1038,6 +1076,8 @@ async function onChange(e) {
     const tbl = t.dataset.chk === 'stop' ? 'stops' : 'workOrders', row = find(tbl, t.dataset.owner);
     upsert(tbl, { ...row, checklist: row.checklist.map((c) => (c.id === t.dataset.id ? { ...c, done: t.checked } : c)) });
   } else if (t.dataset.restore && t.files && t.files[0]) { const f = t.files[0]; t.value = ''; restoreBackup(f);
+  } else if (t.dataset.caltime) { const p = UI.cal && find('properties', UI.cal.pid); if (p) saveDates(p, p.dates.map((x) => (x.d === t.dataset.caltime ? { ...x, t: t.value } : x)));
+  } else if (t.id === 'cal_def') { const p = UI.cal && find('properties', UI.cal.pid); if (p) upsert('properties', { ...p, def_time: t.value });
   } else if (t.dataset.cflag) { const c = find('clients', t.dataset.id); if (c) upsert('clients', { ...c, [t.dataset.cflag]: !t.checked });
   } else if (t.dataset.set) { setPath(S.settings, t.dataset.set, t.checked); persist(); }
   else if (t.dataset.note) { const row = find('stops', t.dataset.note); if (row) upsert('stops', { ...row, client_note: t.value }); }
