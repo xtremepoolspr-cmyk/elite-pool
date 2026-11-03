@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v16 · Nombre opcional con logo';
+const APP_VERSION = 'v18 · Precio por propiedad';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -34,7 +34,7 @@ const enqueue = (op) => S.queue.push({ id: uid('op'), ts: new Date().toISOString
 function upsert(table, row) {
   const list = S.db[table], i = list.findIndex((r) => r.id === row.id);
   if (i >= 0) list[i] = row; else list.push(row);
-  enqueue({ table, op: 'upsert', rowId: row.id, payload: table === 'photos' ? { ...row, uri: '[local]' } : row });
+  enqueue({ table, op: 'upsert', rowId: row.id, payload: table === 'photos' ? { ...row, uri: '[local]' } : (table === 'properties' && row.photo ? { ...row, photo: { ...row.photo, uri: '[local]' } } : row) });
   changed();
 }
 function remove(table, id) { S.db[table] = S.db[table].filter((r) => r.id !== id); enqueue({ table, op: 'delete', rowId: id }); changed(); }
@@ -286,6 +286,7 @@ function stopView(id) {
     <div class="mt-s"><a href="${esc(navUrl(prop))}" target="_blank" rel="noopener">📍 ${esc(prop.address)}, ${esc(prop.municipality)}</a></div>
     ${client.phone ? `<div class="mt-s"><a href="tel:${digits(client.phone)}">📞 ${esc(client.phone)}</a></div>` : ''}
     ${muted(`Check-in: ${fmtTime(stop.check_in_time)} · Check-out: ${fmtTime(stop.check_out_time)}`, 'mt-s')}</div>
+    ${prop.photo && prop.photo.uri ? `<div class="card"><b>Foto de referencia</b><img class="refimg mt-s" src="${prop.photo.uri}" alt="Foto de la propiedad" data-act="viewRef" data-id="${prop.id}"></div>` : `<div class="card"><b>Foto de referencia</b>${muted('Aún no hay foto del frente.')}<div class="btns"><label class="btn sm">📷 Tomar foto del frente<input type="file" accept="image/*" capture="environment" hidden data-ref="${prop.id}"></label></div></div>`}
     <div class="card note"><b>Notas de acceso</b><div>🔑 Portón: ${esc(prop.gate_code || 'sin código')}</div><div>${esc(prop.access_notes || 'Sin notas.')}</div>${client.notes ? muted('Cliente: ' + esc(client.notes), 'mt-s') : ''}</div>`;
   h += '<h2>Cuerpos de agua en esta parada</h2><div class="chips">' + wbs.map((w) => chip(`${w.name} · ${w.gallons.toLocaleString('es-PR')} gal`, stop.active_water_body_ids.includes(w.id), locked ? 'noop' : 'toggleWb', { stop: stop.id, wb: w.id })).join('') + '</div>';
   wbs.filter((w) => stop.active_water_body_ids.includes(w.id)).forEach((w) => {
@@ -330,6 +331,11 @@ function clientsTab() {
   return { title: 'Clientes', sub: `${activeClients().length} activos`, right: btn('+ Nuevo', 'newClient', {}, 'sm'), body: h };
 }
 
+function refBlock(p) {
+  const inp = (cap, label, cls) => `<label class="btn sm ${cls}">${label}<input type="file" accept="image/*" ${cap ? 'capture="environment"' : ''} hidden data-ref="${p.id}"></label>`;
+  if (p.photo && p.photo.uri) return `<div class="mt-s"><img class="refimg" src="${p.photo.uri}" alt="Foto de la propiedad" data-act="viewRef" data-id="${p.id}"></div><div class="btns">${inp(true, '📷 Nueva foto', 'ghost')}${inp(false, '🖼 Galería', 'ghost')}${btn('Quitar foto', 'delRef', { id: p.id }, 'sm danger')}</div>`;
+  return `<div class="mt-s">${muted('Sin foto de referencia del frente.')}</div><div class="btns">${inp(true, '📷 Foto del frente', '')}${inp(false, '🖼 Galería', 'ghost')}</div>`;
+}
 function clientView(id) {
   const c = find('clients', id);
   if (!c) return { title: '—', body: empty('Cliente no encontrado.') };
@@ -340,9 +346,10 @@ function clientView(id) {
     ${muted('Se guarda al instante. Los informes y facturas se envían con estas opciones en 1 solo toque.', 'mt')}</div>
     <div class="row between"><h2>Propiedades</h2>${btn('+ Propiedad', 'newProp', { c: c.id }, 'sm ghost')}</div>`;
   T('properties').filter((p) => p.client_id === c.id).forEach((p) => {
-    h += `<div class="card"><b>${esc(p.address)}</b>${muted(esc(p.municipality) + ' · Portón: ' + esc(p.gate_code || 'sin código'))}${p.access_notes ? muted(esc(p.access_notes)) : ''}
+    h += `<div class="card"><b>${esc(p.address)}</b>${muted(esc(p.municipality) + ' · Portón: ' + esc(p.gate_code || 'sin código'))}${muted('💵 ' + propFeeLabel(p, c))}${p.access_notes ? muted(esc(p.access_notes)) : ''}
       <div class="mt-s"><b style="font-size:13px">Días de servicio de esta propiedad</b><div class="chips mt-s">${DAYS.map((n, i) => chip(DAYS_S[i], (p.service_days || []).includes(i), 'togglePropDay', { id: p.id, d: i })).join('')}</div></div>
       <div class="mt-s">${btn('📅 Airbnb / fechas específicas' + ((p.dates || []).length ? ` (${(p.dates || []).length})` : ''), 'openCal', { id: p.id }, 'sm ghost')}${(p.dates || []).filter((x) => x.d >= todayISO()).length ? muted('Próximas: ' + esc((p.dates || []).filter((x) => x.d >= todayISO()).slice(0, 4).map((x) => fmtDate(x.d).replace(/ \d{4}$/, '') + (x.t ? ' ' + fmtHM(x.t) : '')).join(' · ')) + ((p.dates || []).filter((x) => x.d >= todayISO()).length > 4 ? ' …' : ''), 'mt-s') : ''}</div>
+      ${refBlock(p)}
       <div class="btns">${btn('Editar', 'editProp', { id: p.id, c: c.id }, 'sm ghost')}${btn('🗑', 'delProp', { id: p.id }, 'sm ghost')}${btn('+ Cuerpo de agua', 'newWb', { p: p.id }, 'sm')}</div>`;
     T('waterBodies').filter((w) => w.property_id === p.id).forEach((w) => {
       h += `<div class="mt" style="padding-left:12px;border-left:3px solid ${COL.water}"><b>💧 ${esc(w.name)}</b> ${muted('· ' + w.gallons.toLocaleString('es-PR') + ' gal')}
@@ -363,10 +370,10 @@ const CLIENT_F = [
   { k: 'channel', l: 'Canal de envío predeterminado', t: 'choice', o: CHANNELS }, { k: 'format', l: 'Formato de envío predeterminado', t: 'choice', o: FORMATS }, { k: 'notes', l: 'Notas', t: 'area' },
 ];
 const PROP_F = [
-  { k: 'address', l: 'Dirección', req: 1 }, { k: 'municipality', l: 'Municipio / zona', ph: 'Caguas, San Juan, Guaynabo, Dorado, Montehiedra…' }, { k: 'gate_code', l: 'Código de portón' }, { k: 'service_days', l: 'Días de servicio de esta propiedad (puedes marcar varios)', t: 'days' },
+  { k: 'address', l: 'Dirección', req: 1 }, { k: 'municipality', l: 'Municipio / zona', ph: 'Caguas, San Juan, Guaynabo, Dorado, Montehiedra…' }, { k: 'gate_code', l: 'Código de portón' }, { k: 'service_days', l: 'Días de servicio de esta propiedad (puedes marcar varios)', t: 'days' }, { k: 'fee', l: 'Precio de ESTA propiedad ($) — déjalo vacío para usar el precio del cliente', t: 'number', ph: 'Ej. 85' }, 
   { k: 'access_notes', l: 'Notas de acceso (mascotas, cuarto de bombas)', t: 'area' }, { k: 'gps', t: 'gps' }, { k: 'lat', l: 'Latitud', t: 'number', ph: '18.2341' }, { k: 'lng', l: 'Longitud', t: 'number', ph: '-66.0485' },
 ];
-const NEWCLIENT_PROP_F = [{ k: 'address', l: 'Dirección de la propiedad (opcional)' }, { k: 'municipality', l: 'Municipio / zona', ph: 'Caguas, San Juan, Guaynabo, Dorado…' }, { k: 'gate_code', l: 'Código de portón' }, { k: 'service_days', l: 'Días de servicio de esta propiedad', t: 'days' }, { k: 'gps', t: 'gps' }, { k: 'lat', l: 'Latitud', t: 'number' }, { k: 'lng', l: 'Longitud', t: 'number' }];
+const NEWCLIENT_PROP_F = [{ k: 'address', l: 'Dirección de la propiedad (opcional)' }, { k: 'municipality', l: 'Municipio / zona', ph: 'Caguas, San Juan, Guaynabo, Dorado…' }, { k: 'gate_code', l: 'Código de portón' }, { k: 'service_days', l: 'Días de servicio de esta propiedad', t: 'days' }, { k: 'fee', l: 'Precio de ESTA propiedad ($) — déjalo vacío para usar el precio del cliente', t: 'number', ph: 'Ej. 85' }, { k: 'gps', t: 'gps' }, { k: 'lat', l: 'Latitud', t: 'number' }, { k: 'lng', l: 'Longitud', t: 'number' }];
 const WB_F = [{ k: 'name', l: 'Nombre', req: 1, ph: 'Piscina Principal, Jacuzzi, Espejo de Agua' }, { k: 'type', l: 'Tipo', t: 'choice', o: [['Pool', 'Piscina'], ['Jacuzzi', 'Jacuzzi'], ['Commercial', 'Comercial']] }, { k: 'gallons', l: 'Volumen (galones)', t: 'number', req: 1 }];
 const EQ_F = [{ k: 'category', l: 'Categoría', req: 1, ph: 'Bomba, Filtro, Calentador, Clorador salino, Automatización' }, { k: 'brand', l: 'Marca' }, { k: 'model', l: 'Modelo' }, { k: 'serial_number', l: 'Serial' }, { k: 'status', l: 'Estado', t: 'choice', o: [['OK', 'OK'], ['Atención', 'Atención'], ['Averiado', 'Averiado']] }];
 
@@ -404,11 +411,11 @@ function submitForm() {
     const cid = old ? old.id : uid('c');
     upsert('clients', { id: cid, name: g('name'), phone: g('phone'), email: g('email'), dispatch_channel_pref: g('channel') || 'WHATSAPP', dispatch_format_pref: g('format') || 'TEXT', status: old ? old.status : 'ACTIVE', notes: g('notes'), fee_type: g('fee_type') === 'PER_SERVICE' ? 'PER_SERVICE' : 'MONTHLY', monthly_fee: toNum(g('monthly_fee')) || 0, tags: g('tags').split(',').map((t) => t.trim()).filter(Boolean) });
     if (!old && (g('address') || g('lat'))) {
-      upsert('properties', { id: uid('p'), client_id: cid, address: g('address') || 'Sin dirección', municipality: g('municipality'), gate_code: g('gate_code'), access_notes: '', service_days: daysOf(g('service_days')), lat: toNum(g('lat')) ?? DEPOT.lat, lng: toNum(g('lng')) ?? DEPOT.lng });
+      upsert('properties', { id: uid('p'), client_id: cid, fee: toNum(g('fee')) ?? null, address: g('address') || 'Sin dirección', municipality: g('municipality'), gate_code: g('gate_code'), access_notes: '', service_days: daysOf(g('service_days')), lat: toNum(g('lat')) ?? DEPOT.lat, lng: toNum(g('lng')) ?? DEPOT.lng });
     }
   } else if (F.kind === 'prop') {
     const old = F.id && find('properties', F.id);
-    upsert('properties', { id: old ? old.id : uid('p'), client_id: old ? old.client_id : F.parent, address: g('address'), municipality: g('municipality'), gate_code: g('gate_code'), access_notes: g('access_notes'), service_days: daysOf(g('service_days')), lat: toNum(g('lat')) ?? DEPOT.lat, lng: toNum(g('lng')) ?? DEPOT.lng });
+    upsert('properties', { ...(old || {}), id: old ? old.id : uid('p'), client_id: old ? old.client_id : F.parent, fee: toNum(g('fee')) ?? null, address: g('address'), municipality: g('municipality'), gate_code: g('gate_code'), access_notes: g('access_notes'), service_days: daysOf(g('service_days')), lat: toNum(g('lat')) ?? DEPOT.lat, lng: toNum(g('lng')) ?? DEPOT.lng });
   } else if (F.kind === 'wb') {
     const old = F.id && find('waterBodies', F.id);
     upsert('waterBodies', { id: old ? old.id : uid('w'), property_id: old ? old.property_id : F.parent, name: g('name'), type: g('type') || 'Pool', gallons: Math.round(toNum(g('gallons')) || 0) });
@@ -958,6 +965,8 @@ const A = {
   },
   openPdfSettings: () => go('pdf', 'x'),
   openTemplates: () => { go('pdf', 'x'); setTimeout(() => { const e = document.getElementById('tpl_sec'); if (e) e.scrollIntoView(); }, 60); },
+  viewRef: (d) => { const p = find('properties', d.id); if (p && p.photo) openSheet(esc(p.address), `<img src="${p.photo.uri}" style="width:100%;border-radius:12px" alt="">`); },
+  delRef: (d) => { const p = find('properties', d.id); if (p && confirm('¿Quitar la foto de esta propiedad?')) { const q = { ...p }; delete q.photo; upsert('properties', q); } },
   delLogo: () => { S.settings.logo = null; persist(); render(); },
   resetPdf: () => { if (confirm('Se restauran las opciones de PDF (el logo y los datos del negocio se conservan).')) { const d = mergeSettings(null); S.settings.invoice = d.invoice; S.settings.report = d.report; persist(); render(); } },
   previewPdf: async (d) => {
@@ -1213,6 +1222,10 @@ async function onChange(e) {
   } else if (t.dataset.cflag) { const c = find('clients', t.dataset.id); if (c) upsert('clients', { ...c, [t.dataset.cflag]: !t.checked });
   } else if (t.dataset.set) { setPath(S.settings, t.dataset.set, t.checked); persist(); }
   else if (t.dataset.note) { const row = find('stops', t.dataset.note); if (row) upsert('stops', { ...row, client_note: t.value }); }
+  else if (t.dataset.ref && t.files && t.files[0]) {
+    const f = t.files[0]; t.value = '';
+    try { const p = find('properties', t.dataset.ref); if (p) { upsert('properties', { ...p, photo: await processRef(f) }); toast('Foto guardada'); } } catch (err) { alert('No se pudo leer la imagen: ' + err.message); }
+  }
   else if (t.dataset.logo && t.files && t.files[0]) {
     const f = t.files[0]; t.value = '';
     try { S.settings.logo = await processLogo(f); persist(); render(); toast('Logo guardado'); } catch (err) { alert('No se pudo leer la imagen: ' + err.message); }

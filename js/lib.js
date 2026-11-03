@@ -122,18 +122,29 @@ function paymentInstructions(m, cfg) {
 /** Cuota mensual + piezas INSTALADAS + órdenes COMPLETADAS. */
 /** Texto del cobro del cliente: «$125.00 / mes» o «$35.00 por servicio». */
 const feeLabel = (c) => `${money(c.monthly_fee)} ${c.fee_type === 'PER_SERVICE' ? 'por servicio' : '/ mes'}`;
+/** Precio de una propiedad: el suyo si lo tiene; si no, el del cliente. */
+const propFee = (p, c) => (p && p.fee != null && p.fee !== '' && +p.fee >= 0 ? +p.fee : +c.monthly_fee || 0);
+const propFeeLabel = (p, c) => `${money(propFee(p, c))} ${c.fee_type === 'PER_SERVICE' ? 'por servicio' : '/ mes'}${p && p.fee != null && p.fee !== '' ? ' (precio propio)' : ' (precio del cliente)'}`;
 function buildInvoice(client, db, period, today) {
   const lines = []; let stopIds = [];
   if (client.fee_type === 'PER_SERVICE') {
     // cobro por visita: cuenta las paradas completadas que aún no se han facturado (hasta el fin del periodo)
     const dateOf = (s) => (db.routes.find((r) => r.id === s.route_id) || {}).date || '';
     const visits = db.stops.filter((s) => s.status === 'DONE' && !s.invoice_id && db.properties.some((p) => p.id === s.property_id && p.client_id === client.id) && dateOf(s) && dateOf(s) <= `${period}-31`).sort((a, b) => dateOf(a).localeCompare(dateOf(b)));
-    if (visits.length && client.monthly_fee > 0) {
-      stopIds = visits.map((s) => s.id);
-      const days = visits.map((s) => fmtDate(dateOf(s)).replace(/ \d{4}$/, '')).join(', ');
-      lines.push({ description: `Mantenimiento de piscina — ${visits.length} visita${visits.length > 1 ? 's' : ''} × ${money(client.monthly_fee)} (${days})`, amount: Math.round(visits.length * client.monthly_fee * 100) / 100, kind: 'VISIT' });
-    }
-  } else if (client.monthly_fee > 0) lines.push({ description: 'Cuota mensual de mantenimiento de piscina', amount: client.monthly_fee, kind: 'FEE' });
+    const myProps = db.properties.filter((p) => p.client_id === client.id), multi = myProps.length > 1;
+    myProps.forEach((p) => {
+      const vs = visits.filter((s) => s.property_id === p.id), fee = propFee(p, client);
+      if (!vs.length || !(fee > 0)) return;
+      stopIds.push(...vs.map((s) => s.id));
+      const days = vs.map((s) => fmtDate(dateOf(s)).replace(/ \d{4}$/, '')).join(', ');
+      lines.push({ description: `Mantenimiento de piscina${multi ? ' — ' + p.address : ''} — ${vs.length} visita${vs.length > 1 ? 's' : ''} × ${money(fee)} (${days})`, amount: Math.round(vs.length * fee * 100) / 100, kind: 'VISIT' });
+    });
+  } else {
+    const myProps = db.properties.filter((p) => p.client_id === client.id);
+    if (myProps.some((p) => p.fee != null && p.fee !== '')) {
+      myProps.forEach((p) => { const fee = propFee(p, client); if (fee > 0) lines.push({ description: `Cuota mensual de mantenimiento — ${p.address}`, amount: fee, kind: 'FEE' }); });
+    } else if (client.monthly_fee > 0) lines.push({ description: 'Cuota mensual de mantenimiento de piscina', amount: client.monthly_fee, kind: 'FEE' });
+  }
   const items = db.shoppingItems.filter((i) => i.client_id === client.id && i.status === 'INSTALLED');
   items.forEach((i) => lines.push({ description: i.item_name, amount: i.price, kind: 'PART', ref_id: i.id }));
   const orders = db.workOrders.filter((w) => w.client_id === client.id && w.status === 'DONE');
@@ -185,6 +196,17 @@ async function processLogo(file) {
   const ctx = cv.getContext('2d');
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); ctx.drawImage(bmp, 0, 0, w, h);
   return { data: cv.toDataURL('image/jpeg', 0.92), w, h };
+}
+
+/** Foto de referencia de una propiedad (sin sello): máx. 1000px, JPEG. */
+async function processRef(file) {
+  let bmp;
+  try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch (e) { bmp = await createImageBitmap(file); }
+  const sc = Math.min(1, 1000 / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * sc)), h = Math.max(1, Math.round(bmp.height * sc));
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  cv.getContext('2d').drawImage(bmp, 0, 0, w, h);
+  return { uri: cv.toDataURL('image/jpeg', 0.75), w, h, at: Date.now() };
 }
 
 /* ---------- PDF (generador propio, sin librerías) ---------- */
@@ -801,8 +823,8 @@ function backupSheets(db) {
     const wbs = db.waterBodies.filter((w) => props.some((x) => x.id === w.property_id)).map((w) => `${w.name} (${w.gallons} gal)`).join('; ');
     clientes.push([c.name, c.status === 'ACTIVE' ? 'Activo' : 'Archivado', c.phone, c.email, c.fee_type === 'PER_SERVICE' ? 'Por servicio' : 'Mensual', +c.monthly_fee || 0, CH[c.dispatch_channel_pref] || '', FM[c.dispatch_format_pref] || '', props.map((x) => x.address).join(' | '), p.municipality || '', p.gate_code || '', p.access_notes || '', p.lat ?? '', p.lng ?? '', wbs, (c.tags || []).join(', '), c.notes || '']);
   });
-  const props = [['Cliente', 'Dirección', 'Municipio', 'Días de servicio', 'Fechas específicas (Airbnb)', 'Código de portón', 'Notas de acceso', 'Latitud', 'Longitud', 'Cuerpos de agua']];
-  db.properties.forEach((p) => props.push([cname(p.client_id), p.address, p.municipality, (p.service_days || []).map((d) => DN[d]).join(', '), (p.dates || []).map((x) => x.d + (x.t ? ' ' + x.t : '')).join('; '), p.gate_code || '', p.access_notes || '', p.lat ?? '', p.lng ?? '', db.waterBodies.filter((w) => w.property_id === p.id).map((w) => `${w.name} (${w.gallons} gal)`).join('; ')]));
+  const props = [['Cliente', 'Dirección', 'Municipio', 'Días de servicio', 'Fechas específicas (Airbnb)', 'Código de portón', 'Notas de acceso', 'Latitud', 'Longitud', 'Cuerpos de agua', 'Precio propio ($)']];
+  db.properties.forEach((p) => props.push([cname(p.client_id), p.address, p.municipality, (p.service_days || []).map((d) => DN[d]).join(', '), (p.dates || []).map((x) => x.d + (x.t ? ' ' + x.t : '')).join('; '), p.gate_code || '', p.access_notes || '', p.lat ?? '', p.lng ?? '', db.waterBodies.filter((w) => w.property_id === p.id).map((w) => `${w.name} (${w.gallons} gal)`).join('; '), p.fee != null && p.fee !== '' ? +p.fee : '']));
   const facturas = [['Número', 'Cliente', 'Período', 'Vence', 'Total', 'Estado', 'Método de pago']];
   db.invoices.forEach((i) => facturas.push([invNumber(i, db), cname(i.client_id), i.period, i.due_date, +i.total_amount || 0, STATUS_LABEL[effectiveStatus(i, todayISO())] || i.status, PAYMENT_LABEL[i.payment_method] || i.payment_method]));
   const lecturas = [['Fecha', 'Cliente', 'Cuerpo de agua', 'Cloro libre', 'pH', 'Alcalinidad', 'Ác. cianúrico', 'Sal', 'Dureza de calcio']];
@@ -870,4 +892,4 @@ async function processPhoto(file, kind, coords) {
   return { uri: cv.toDataURL('image/jpeg', 0.72), w, h };
 }
 
-if (typeof module !== 'undefined') module.exports = { buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
+if (typeof module !== 'undefined') module.exports = { propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
