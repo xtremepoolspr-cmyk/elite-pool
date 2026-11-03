@@ -152,7 +152,7 @@ const DEFAULT_SETTINGS = {
   logo: null,
   pay: { athLink: '', athPhone: ATH_BUSINESS_PHONE },
   invoice: {
-    logo: true, bizInfo: true, number: true, dates: true, clientInfo: true, itemType: true, subtotals: true,
+    logo: true, showName: true, bizInfo: true, number: true, dates: true, clientInfo: true, itemType: true, subtotals: true,
     payBox: true, instructions: true, terms: true, stamp: true, footer: true,
     template: 'classic', accent: '#0284c7',
     termsText: 'Pago dentro de 15 días a partir de la fecha de emisión. Gracias por su preferencia.',
@@ -161,7 +161,7 @@ const DEFAULT_SETTINGS = {
   quote: { validDays: 15, accept: true, terms: 'Cotización sujeta a cambios si las condiciones de la piscina o los equipos son diferentes a lo inspeccionado.', footerText: 'Gracias por su interés en Elite Pool Service PR' },
   catalog: [],
   report: {
-    logo: false, bizInfo: true, clientBlock: true, times: true, tech: true, readings: true, ideal: true, previous: true,
+    logo: false, showName: true, bizInfo: true, clientBlock: true, times: true, tech: true, readings: true, ideal: true, previous: true,
     summary: true, doses: true, equipment: false, checklist: true, notes: true, parts: true, photos: true, footer: true,
     footerText: 'Gracias por confiar en Elite Pool Service PR',
   },
@@ -267,12 +267,13 @@ function buildPdf(title, lines, opts = {}) {
   const hd = opts.header || { name: 'Elite Pool Service PR', lines: [], label: '', meta: [] };
   const th = opts.theme || { t: 'classic', acc: ACC }, AC = th.acc || ACC, WHITE = [1, 1, 1];
   const lsz = th.t === 'elegant' ? 15 : 20;
-  const logoDims = (mw, mh) => { const sc = Math.min(mw / hd.logo.w, mh / hd.logo.h); return { lw: hd.logo.w * sc, lh: hd.logo.h * sc }; };
+  const bigLogo = !hd.name && hd.logo; // el logo ya trae el nombre: se muestra más grande
+  const logoDims = (mw, mh) => { if (bigLogo) { mw *= 1.5; mh *= 1.4; } const sc = Math.min(mw / hd.logo.w, mh / hd.logo.h); return { lw: hd.logo.w * sc, lh: hd.logo.h * sc }; };
   if (th.t === 'modern') {
     let x0 = M, lh = 0;
     if (hd.logo) { const d = logoDims(120, 56); lh = d.lh; x0 = M + d.lw + 20; }
     const labW = hd.label ? tw(hd.label, lsz, true) + 18 : 0, leftMax = Math.max(120, W - M - labW - x0);
-    const nl = wrapLines(hd.name || '', 16, true, leftMax), bl = [];
+    const nl = hd.name ? wrapLines(hd.name, 16, true, leftMax) : [], bl = [];
     (hd.lines || []).forEach((l) => wrapLines(l, 8.5, false, leftMax).forEach((ln) => bl.push(ln)));
     const bandH = Math.max(86, 22 + nl.length * 19 + bl.length * 11 + 14, lh + 28);
     rect(0, H - bandH, W, bandH, AC);
@@ -286,7 +287,7 @@ function buildPdf(title, lines, opts = {}) {
   } else if (th.t === 'elegant') {
     y = H - M + 6;
     if (hd.logo) { const d = logoDims(170, 62); drawImg(hd.logo, (W - d.lw) / 2, y, d.lw, d.lh); y -= d.lh + 8; }
-    wrapLines(hd.name || '', 18, true, CW).forEach((ln) => { text(ln, (W - tw(ln, 18, true)) / 2, y - 16, 18, true, INK); y -= 22; });
+    (hd.name ? wrapLines(hd.name, 18, true, CW) : []).forEach((ln) => { text(ln, (W - tw(ln, 18, true)) / 2, y - 16, 18, true, INK); y -= 22; });
     (hd.lines || []).forEach((l) => wrapLines(l, 8.5, false, CW).forEach((ln) => { text(ln, (W - tw(ln, 8.5, false)) / 2, y - 9, 8.5, false, GREY); y -= 11; }));
     y -= 8; rect(M + CW * 0.3, y, CW * 0.4, 1.4, AC); y -= 20;
     if (hd.label) { text(hd.label, (W - tw(hd.label, lsz, true)) / 2, y - 12, lsz, true, AC); y -= 26; }
@@ -298,7 +299,7 @@ function buildPdf(title, lines, opts = {}) {
     if (hd.logo) { const d = logoDims(150, 62); drawImg(hd.logo, M, y, d.lw, d.lh); x0 = M + d.lw + 12; leftBottom = y - d.lh; }
     let ly = y - 13;
     const labW = hd.label ? tw(hd.label, 20, true) + 18 : 0, leftMax = Math.max(120, CW - labW - (x0 - M));
-    wrapLines(hd.name || '', 15, true, leftMax).forEach((ln) => { text(ln, x0, ly, 15, true, INK); ly -= 17; });
+    (hd.name ? wrapLines(hd.name, 15, true, leftMax) : []).forEach((ln) => { text(ln, x0, ly, 15, true, INK); ly -= 17; });
     (hd.lines || []).forEach((l) => wrapLines(l, 8.5, false, leftMax).forEach((ln) => { text(ln, x0, ly, 8.5, false, GREY); ly -= 11; }));
     leftBottom = Math.min(leftBottom, ly + 6);
     let ry = y - 20;
@@ -444,7 +445,8 @@ function docTheme(cfg) {
 }
 function pdfHeader(cfg, key, label, meta) {
   const o = cfg[key];
-  return { logo: o.logo && cfg.logo ? cfg.logo : null, name: cfg.biz.name || 'Elite Pool Service PR', lines: o.bizInfo ? bizLines(cfg.biz) : [], label, meta };
+  const logo = o.logo && cfg.logo ? cfg.logo : null;
+  return { logo, name: logo && o.showName === false ? '' : cfg.biz.name || 'Elite Pool Service PR', lines: o.bizInfo ? bizLines(cfg.biz) : [], label, meta };
 }
 function invNumber(inv, db) {
   if (inv.number) return inv.number;

@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v14 · Cotizaciones y plantillas';
+const APP_VERSION = 'v16 · Nombre opcional con logo';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -517,7 +517,7 @@ function invoicesTab() {
     ${btn('⚡ Procesar facturación del mes (1 toque)', 'bulkInvoices', {}, 'dark')}<div class="mt"></div>
     <div class="chips">${chip('Todas', UI.invFilter === 'ALL', 'setInvFilter', { v: 'ALL' })}${Object.keys(STATUS_LABEL).map((s) => chip(STATUS_LABEL[s], UI.invFilter === s, 'setInvFilter', { v: s }, INV_COLOR[s])).join('')}</div>`;
   h += list.length ? '<div class="cols">' + list.map((i) => `<div class="card bar tap" style="border-left-color:${INV_COLOR[invView(i)]}" data-act="openInvoice" data-id="${i.id}"><div class="row between"><b>${esc(clientName(i.client_id))}</b>${badge(STATUS_LABEL[invView(i)], INV_COLOR[invView(i)])}</div>${muted(`${i.period} · vence ${fmtDate(i.due_date)}`, 'mt-s')}<div class="amount">${money(i.total_amount)}</div></div>`).join('') + '</div>' : empty('No hay facturas en esta vista.');
-  return { title: 'Facturación', sub: `Periodo ${period}`, right: btn('+ Factura', 'newInvoice', {}, 'sm'), body: invModeSeg() + '<div class="mt"></div>' + h };
+  return { title: 'Facturación', sub: `Periodo ${period}`, right: btn('+ Factura', 'newInvoice', {}, 'sm'), body: invModeSeg() + '<div class="mt"></div>' + h + `<div class="mt"></div>${btn('🎨 Cambiar plantilla de factura y cotización', 'openTemplates', {}, 'sm ghost')}` };
 }
 function invoiceView(id) {
   const inv = find('invoices', id), c = inv && find('clients', inv.client_id);
@@ -577,7 +577,7 @@ function msgTab() {
   if (M.subject === null) { M.subject = tpl.subject; M.body = tpl.body; }
   const act = activeClients(), combo = (ch, f) => act.filter((c) => c.dispatch_channel_pref === ch && c.dispatch_format_pref === f).length;
   const rec = msgRecipients();
-  let h = `<h2>Documentos PDF</h2><div class="card">Logo, datos del negocio y qué secciones salen en la factura y el informe.${S.settings.logo ? muted('Logo cargado ✓', 'mt-s') : ''}<div class="mt-s"></div>${btn('🎨 Personalizar PDF y logo', 'openPdfSettings', {}, 'ghost')}</div>
+  let h = `<h2>Documentos PDF</h2><div class="card">Logo, datos del negocio, <b>plantilla de factura y cotización</b> y qué secciones salen en cada PDF.${S.settings.logo ? muted('Logo cargado ✓', 'mt-s') : ''}<div class="mt-s"></div>${btn('🎨 Personalizar PDF y logo', 'openPdfSettings', {}, 'ghost')}</div>
     <h2>Motor de envío híbrido</h2><div class="card">Cada informe y factura sale por el canal (WhatsApp / Email / Ambos) y en el formato (PDF / Texto / Ambos) guardados en la ficha del cliente.
     ${muted('Clientes activos por preferencia', 'mt-s')}${['WHATSAPP', 'EMAIL', 'BOTH'].map((ch) => `<div>${{ WHATSAPP: 'WhatsApp', EMAIL: 'Email', BOTH: 'Ambos' }[ch]}: PDF ${combo(ch, 'PDF')} · Texto ${combo(ch, 'TEXT')} · Ambos ${combo(ch, 'BOTH')}</div>`).join('')}</div>
     <h2>Aviso masivo</h2>${muted('Plantilla', 'mb')}<div class="chips">${TEMPLATES.map((t) => chip(t.label, M.tpl === t.id, 'setTpl', { id: t.id })).join('')}</div>
@@ -647,8 +647,8 @@ const TAB_FN = { routes: routesTab, clients: clientsTab, chem: chemTab, orders: 
 /* =====================================================================
    Personalizar PDF (logo, datos del negocio y secciones)
    ===================================================================== */
-const INV_OPTS = [['logo', 'Logo'], ['bizInfo', 'Datos del negocio (dirección, teléfono, correo)'], ['number', 'Número de factura'], ['dates', 'Fechas de emisión y vencimiento'], ['clientInfo', 'Datos del cliente'], ['itemType', 'Columna «Tipo» (servicio / pieza / orden)'], ['subtotals', 'Subtotales por categoría'], ['payBox', 'Recuadro del método de pago'], ['instructions', 'Instrucciones de pago'], ['terms', 'Términos y condiciones'], ['stamp', 'Sello PAGADA / VENCIDA'], ['footer', 'Pie de página']];
-const REP_OPTS = [['logo', 'Logo'], ['bizInfo', 'Datos del negocio'], ['clientBlock', 'Datos del cliente y visita'], ['times', 'Hora de entrada y salida'], ['tech', 'Nombre del técnico'], ['readings', 'Tabla de lecturas químicas'], ['ideal', 'Rango ideal'], ['previous', 'Lectura de la visita anterior'], ['summary', 'Resumen de alertas'], ['doses', 'Productos químicos aplicados'], ['equipment', 'Equipos de la piscina'], ['checklist', 'Trabajo realizado'], ['notes', 'Observaciones'], ['parts', 'Piezas requeridas'], ['photos', 'Fotos antes / después'], ['footer', 'Pie de página']];
+const INV_OPTS = [['logo', 'Logo'], ['showName', 'Nombre del negocio junto al logo (apágalo si tu logo ya trae el nombre)'], ['bizInfo', 'Datos del negocio (dirección, teléfono, correo)'], ['number', 'Número de factura'], ['dates', 'Fechas de emisión y vencimiento'], ['clientInfo', 'Datos del cliente'], ['itemType', 'Columna «Tipo» (servicio / pieza / orden)'], ['subtotals', 'Subtotales por categoría'], ['payBox', 'Recuadro del método de pago'], ['instructions', 'Instrucciones de pago'], ['terms', 'Términos y condiciones'], ['stamp', 'Sello PAGADA / VENCIDA'], ['footer', 'Pie de página']];
+const REP_OPTS = [['logo', 'Logo'], ['showName', 'Nombre del negocio junto al logo (apágalo si tu logo ya trae el nombre)'], ['bizInfo', 'Datos del negocio'], ['clientBlock', 'Datos del cliente y visita'], ['times', 'Hora de entrada y salida'], ['tech', 'Nombre del técnico'], ['readings', 'Tabla de lecturas químicas'], ['ideal', 'Rango ideal'], ['previous', 'Lectura de la visita anterior'], ['summary', 'Resumen de alertas'], ['doses', 'Productos químicos aplicados'], ['equipment', 'Equipos de la piscina'], ['checklist', 'Trabajo realizado'], ['notes', 'Observaciones'], ['parts', 'Piezas requeridas'], ['photos', 'Fotos antes / después'], ['footer', 'Pie de página']];
 const getPath = (o, path) => path.split('.').reduce((a, k) => (a ? a[k] : undefined), o);
 const setPath = (o, path, v) => { const ks = path.split('.'), last = ks.pop(); let t = o; ks.forEach((k) => { t = t[k]; }); t[last] = v; };
 function pdfView() {
@@ -659,7 +659,7 @@ function pdfView() {
     <h2>💳 Cobro con ATH Móvil Business</h2><div class="card">${fld('Enlace de pago ATH Móvil Business', `<input data-setv="pay.athLink" type="url" inputmode="url" autocapitalize="off" value="${esc(st.pay.athLink)}" placeholder="https://…">`)}${tx('pay.athPhone', 'Número ATH Móvil (opcional)', '939-405-7458')}${muted('Pega aquí tu enlace de ATH Móvil Business. Sale en la factura (PDF clicable y texto de WhatsApp) y en la pantalla de la factura. Si lo dejas vacío, solo se muestra el número.')}${st.pay.athLink ? `<div class="mt-s"><a href="${esc(athUrl(st))}" target="_blank" rel="noopener">Probar enlace ↗</a></div>` : ''}</div>
     <h2>👷 Equipo de trabajo</h2><div class="card">${tx('biz.team', 'Nombres separados por coma', 'Carlos, Luis')}${muted('Se usan en Compras para asignar quién compra o instala cada pieza. Si trabajas solo, déjalo con un nombre.')}</div>
     <h2>Datos del negocio</h2><div class="card">${tx('biz.name', 'Nombre')}${tx('biz.tagline', 'Lema (opcional)', 'Mantenimiento de piscinas')}${tx('biz.address', 'Dirección', 'Caguas, Puerto Rico')}${tx('biz.phone', 'Teléfono')}${tx('biz.email', 'Correo')}${tx('biz.regId', 'Registro / Núm. comerciante (opcional)')}${tx('biz.tech', 'Técnico por defecto (informe)')}</div>
-    <h2>🎨 Plantilla de factura y cotización</h2><div class="card"><div class="tplgrid">${DOC_TEMPLATES.map(([k, n, d]) => `<button class="tplc${st.invoice.template === k ? ' on' : ''}" data-act="setTemplate" data-v="${k}" style="--c:${esc(st.invoice.accent || '#0284c7')}">${tplMini(k)}<b>${n}</b><span>${d}</span></button>`).join('')}</div>
+    <h2 id="tpl_sec">🎨 Plantilla de factura y cotización</h2><div class="card"><div class="tplgrid">${DOC_TEMPLATES.map(([k, n, d]) => `<button class="tplc${st.invoice.template === k ? ' on' : ''}" data-act="setTemplate" data-v="${k}" style="--c:${esc(st.invoice.accent || '#0284c7')}">${tplMini(k)}<b>${n}</b><span>${d}</span></button>`).join('')}</div>
     ${muted('Color de acento (la Minimalista no usa color)', 'mt')}<div class="chips mt-s">${ACCENTS.map((c) => `<button class="swatch${(st.invoice.accent || '#0284c7') === c ? ' on' : ''}" data-act="setAccent" data-v="${c}" style="background:${c}" aria-label="${c}"></button>`).join('')}</div>${muted('Usa «👁 Factura» abajo para ver cómo queda.', 'mt-s')}</div>
     <h2>📝 Cotizaciones</h2><div class="card">${fld('Días de vigencia por defecto', `<input data-setv="quote.validDays" inputmode="numeric" value="${esc(st.quote.validDays)}">`)}${fld('Condiciones (salen al final del PDF)', `<textarea data-setv="quote.terms" style="min-height:70px">${esc(st.quote.terms)}</textarea>`)}${fld('Texto del pie', `<input data-setv="quote.footerText" value="${esc(st.quote.footerText)}">`)}<div class="chk"><span class="t">Línea de firma «Aceptada por»</span><label class="sw"><input type="checkbox" data-set="quote.accept"${st.quote.accept ? ' checked' : ''}><i></i></label></div></div>
     <h2>🧾 Factura — qué incluir</h2><div class="card">${tgl('invoice', INV_OPTS)}
@@ -686,6 +686,7 @@ function quotesTab() {
     <div class="chips">${chip('Todas', f === 'ALL', 'setQFilter', { v: 'ALL' })}${Object.keys(QUOTE_LABEL).map((s) => chip(QUOTE_LABEL[s], f === s, 'setQFilter', { v: s }, Q_COLOR[s])).join('')}</div>`;
   h += list.length ? '<div class="cols">' + list.map((q) => { const st = quoteStatus(q), w = quoteWho(q, S.db); return `<div class="card bar tap" style="border-left-color:${Q_COLOR[st]}" data-act="openQuote" data-id="${q.id}"><div class="row between"><b>${esc(w.name)}${q.client_id ? '' : ' <span class="muted">(prospecto)</span>'}</b>${badge(QUOTE_LABEL[st], Q_COLOR[st])}</div>${muted(esc(q.number) + ' · vigencia ' + fmtDate(q.valid_until))}<div class="amount mt-s">${money(quoteTotals(q).total)}</div></div>`; }).join('') + '</div>'
     : empty(all.length ? 'No hay cotizaciones con este estado.' : 'Aún no hay cotizaciones. Toca «+ Cotización» para crear la primera.');
+  h += `<div class="mt"></div>${btn('🎨 Cambiar plantilla de factura y cotización', 'openTemplates', {}, 'sm ghost')}`;
   return { title: 'Cotizaciones', sub: `${all.length} en total`, right: btn('+ Cotización', 'newQuote', {}, 'sm'), body: h };
 }
 function quoteView(id) {
@@ -956,6 +957,7 @@ const A = {
     }
   },
   openPdfSettings: () => go('pdf', 'x'),
+  openTemplates: () => { go('pdf', 'x'); setTimeout(() => { const e = document.getElementById('tpl_sec'); if (e) e.scrollIntoView(); }, 60); },
   delLogo: () => { S.settings.logo = null; persist(); render(); },
   resetPdf: () => { if (confirm('Se restauran las opciones de PDF (el logo y los datos del negocio se conservan).')) { const d = mergeSettings(null); S.settings.invoice = d.invoice; S.settings.report = d.report; persist(); render(); } },
   previewPdf: async (d) => {
