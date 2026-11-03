@@ -40,31 +40,89 @@ function normalizeDose(amount, unit) {
   return { amount: r1(amount), unit };
 }
 
+/* ---------- catálogo de productos químicos ---------- */
+/** per = cantidad para subir 1 ppm (o la unidad indicada) por cada 10,000 galones. Valores de guía de campo. */
+const SANITIZERS = {
+  LIQ125: { name: 'Cloro líquido 12.5%', unit: 'fl oz', per: 10.4 },
+  LIQ10: { name: 'Cloro líquido 10%', unit: 'fl oz', per: 13 },
+  BLEACH: { name: 'Cloro doméstico 6% (Clorox)', unit: 'fl oz', per: 21.7 },
+  CALHYPO: { name: 'Hipoclorito de calcio 65% (granulado)', unit: 'oz', per: 2.1 },
+  TRICHLOR: { name: 'Tricloro 90% (tabletas / polvo)', unit: 'oz', per: 1.5, cya: true },
+  DICHLOR: { name: 'Dicloro 56% (granulado)', unit: 'oz', per: 2.4, cya: true },
+  BROMINE: { name: 'Bromo (BCDMH, granulado / tabletas)', unit: 'oz', per: 2.2, br: true },
+  SWG: { name: 'Generador de cloro salino (sal)', swg: true },
+};
+const PH_DOWN = {
+  MURIATIC: { name: 'Ácido muriático 31.45%', unit: 'fl oz', phPer: 6, alkPer: 2.6 },
+  DRYACID: { name: 'Ácido seco (bisulfato de sodio)', unit: 'oz', phPer: 8, alkPer: 2.4 },
+};
+const CALCIUM_UP = {
+  CACL77: { name: 'Cloruro de calcio 77% (escamas)', per: 19 },
+  CACL94: { name: 'Cloruro de calcio 94–97% (granulado)', per: 15.6 },
+};
+const CHEM_CATS = [
+  { k: 'sanitizer', l: 'Desinfectante que uso normalmente', list: SANITIZERS },
+  { k: 'ph_down', l: 'Para BAJAR el pH y la alcalinidad', list: PH_DOWN },
+  { k: 'calcium', l: 'Para SUBIR la dureza de calcio', list: CALCIUM_UP },
+];
+const DEFAULT_CHEM = { sanitizer: 'LIQ125', ph_down: 'MURIATIC', calcium: 'CACL77' };
+const DEFAULT_TARGETS = { free_chlorine: 3, ph: 7.4, alkalinity: 90, cyanuric_acid: 40, calcium_hardness: 300, salt: 3200 };
+const chemPrefs = (...layers) => { const o = { ...DEFAULT_CHEM }; layers.forEach((l) => l && Object.keys(l).forEach((k) => { if (l[k] && (CHEM_CATS.find((c) => c.k === k) || {}).list && CHEM_CATS.find((c) => c.k === k).list[l[k]]) o[k] = l[k]; })); return o; };
+
 /**
- * Dosis ESTIMADAS por cada 10,000 galones (guía de campo; verifica la etiqueta del producto,
- * aplica en dosis divididas si el ajuste es grande y vuelve a medir):
- *  ácido muriático 31.45%: ~6 fl oz baja el pH 0.1 (objetivo 7.4) · soda ash: ~3 oz sube el pH 0.1
- *  cloro líquido 12.5%: ~10.4 fl oz sube 1 ppm; tricloro 90%: ~1.5 oz por ppm (objetivo 3 ppm)
- *  bicarbonato: ~1.5 lb sube la alcalinidad 10 ppm (objetivo 90) · estabilizador: ~13 oz sube CYA 10 ppm (objetivo 40)
+ * Dosis ESTIMADAS (guía de campo; verifica la etiqueta, aplica en dosis divididas si el ajuste es grande y vuelve a medir).
+ * opts.prefs = productos; opts.targets = valores meta; opts.exact = true (calculadora) corrige cualquier diferencia con la meta,
+ * si no (lecturas en parada) solo corrige cuando el valor está fuera de rango y lleva el valor a la meta.
  */
-function suggestDoses(v, gallons) {
-  const f = gallons / 10000;
+function suggestDoses(v, gallons, opts = {}) {
+  const f = gallons / 10000, exact = !!opts.exact;
+  const pf = chemPrefs(opts.prefs), T = { ...DEFAULT_TARGETS, ...(opts.targets || {}) };
+  const san = SANITIZERS[pf.sanitizer], acid = PH_DOWN[pf.ph_down], cal = CALCIUM_UP[pf.calcium];
   const out = [];
   const push = (chemical_name, amount, unit, reason, alt = false) => {
     const n = normalizeDose(amount, unit);
     if (n.amount > 0) out.push({ chemical_name, amount: n.amount, unit: n.unit, reason, alt });
   };
+  const note = (chemical_name, reason) => out.push({ chemical_name, amount: null, unit: '', reason, alt: false });
   const num = (x) => (x === null || x === undefined || x === '' ? null : +x);
-  const ph = num(v.ph), fc = num(v.free_chlorine), alk = num(v.alkalinity), cya = num(v.cyanuric_acid);
-  if (ph !== null && ph > 7.6) { const d = ph - 7.4; push('Ácido muriático', (d / 0.1) * 6 * f, 'fl oz', `pH ${ph} alto${d > 0.4 ? ' · aplicar en 2 dosis' : ''}`); }
-  if (ph !== null && ph < 7.2) { const d = 7.4 - ph; push('Carbonato de sodio (Soda Ash)', (d / 0.1) * 3 * f, 'oz', `pH ${ph} bajo${d > 0.4 ? ' · aplicar en 2 dosis' : ''}`); }
-  if (fc !== null && fc < 2) {
-    const need = 3 - fc;
-    push('Cloro líquido 12.5%', need * 10.4 * f, 'fl oz', `Cloro ${fc} ppm bajo`);
-    push('Tricloro shock (alternativa)', need * 1.5 * f, 'oz', 'Alternativa al cloro líquido', true);
+  const x = { fc: num(v.free_chlorine), ph: num(v.ph), alk: num(v.alkalinity), cya: num(v.cyanuric_acid), ca: num(v.calcium_hardness), salt: num(v.salt) };
+  const P = (k) => PARAMS.find((p) => p.key === k);
+  const low = (val, k, tol) => val !== null && (exact ? val <= T[k] - tol : val < P(k).ok[0]);
+  const high = (val, k, tol, auto) => val !== null && (exact ? val >= T[k] + tol : val > auto);
+  const fcT = san && san.br ? Math.max(T.free_chlorine, 4) : T.free_chlorine, who = san && san.br ? 'Bromo' : 'Cloro';
+  // desinfectante
+  if (x.fc !== null && (exact ? x.fc <= fcT - 0.3 : x.fc < (san && san.br ? 3 : P('free_chlorine').ok[0]))) {
+    const need = fcT - x.fc;
+    if (san && san.swg) {
+      push('Cloro líquido 12.5% (apoyo al generador)', need * SANITIZERS.LIQ125.per * f, 'fl oz', `${who} ${x.fc} ppm bajo`);
+      note('Generador de sal', 'Sube la salida (%) del generador, alarga las horas de filtración y revisa sal y celda.');
+    } else {
+      push(san.name, need * san.per * f, san.unit, `${who} ${x.fc} ppm bajo${san.cya ? ' · ojo: este producto sube el ácido cianúrico' : ''}${san.br ? ' · las tabletas se disuelven lento (alimentador/flotador)' : ''}`);
+      if (pf.sanitizer === 'LIQ125') push('Tricloro shock (alternativa)', need * 1.5 * f, 'oz', 'Alternativa al cloro líquido', true);
+    }
   }
-  if (alk !== null && alk < 80) push('Bicarbonato de sodio', ((90 - alk) / 10) * 1.5 * f * 16, 'oz', `Alcalinidad ${alk} ppm baja`);
-  if (cya !== null && cya < 30) push('Estabilizador (ác. cianúrico)', ((40 - cya) / 10) * 13 * f, 'oz', `CYA ${cya} ppm bajo`);
+  if (high(x.fc, 'free_chlorine', 0.5, P('free_chlorine').warn[1])) note(`${who} alto`, 'No agregues más; baja solo con el sol y el uso. Si urge: neutralizador (tiosulfato de sodio) o diluir con agua fresca.');
+  // pH y alcalinidad (el ácido sirve para los dos)
+  const phHigh = high(x.ph, 'ph', 0.05, P('ph').ok[1]), alkHigh = high(x.alk, 'alkalinity', 4, P('alkalinity').ok[1]);
+  const dPh = phHigh ? x.ph - T.ph : 0, dAlk = alkHigh ? x.alk - T.alkalinity : 0;
+  if (phHigh || alkHigh) {
+    const aPh = (dPh / 0.1) * acid.phPer * f, aAlk = dAlk * acid.alkPer * f;
+    const reasons = [phHigh ? `pH ${x.ph} alto` : '', alkHigh ? `alcalinidad ${x.alk} ppm alta` : ''].filter(Boolean).join(' y ');
+    const big = (phHigh && dPh > 0.4) || (alkHigh && dAlk > 30);
+    push(acid.name, Math.max(aPh, aAlk), acid.unit, `${reasons}${big ? ' · aplicar en 2 o 3 dosis' : ''}`);
+    if (alkHigh && !phHigh) note('Aireación', 'El ácido también baja el pH: airea el agua (chorros, cascada) para subir el pH sin subir la alcalinidad.');
+  }
+  if (low(x.ph, 'ph', 0.05)) { const d = T.ph - x.ph; push('Carbonato de sodio (Soda Ash)', (d / 0.1) * 3 * f, 'oz', `pH ${x.ph} bajo${d > 0.4 ? ' · aplicar en 2 dosis' : ''}`); }
+  if (low(x.alk, 'alkalinity', 4) && x.alk < T.alkalinity) push('Bicarbonato de sodio', ((T.alkalinity - x.alk) / 10) * 1.5 * f * 16, 'oz', `Alcalinidad ${x.alk} ppm baja`);
+  // estabilizador
+  if (low(x.cya, 'cyanuric_acid', 4) && x.cya < T.cyanuric_acid) push('Estabilizador (ác. cianúrico)', ((T.cyanuric_acid - x.cya) / 10) * 13 * f, 'oz', `CYA ${x.cya} ppm bajo`);
+  const dil = (val, tgt, label) => push('Diluir: vaciar parte y rellenar con agua fresca', Math.max(0, (1 - tgt / val) * 100), '% del agua', `${label} ${val} ppm alto (meta ${tgt}). No hay químico que lo baje.`);
+  if (high(x.cya, 'cyanuric_acid', 4, P('cyanuric_acid').warn[1])) dil(x.cya, T.cyanuric_acid, 'CYA');
+  // calcio y sal
+  if (low(x.ca, 'calcium_hardness', 9) && x.ca < T.calcium_hardness) push(cal.name, ((T.calcium_hardness - x.ca) / 10) * cal.per * f, 'oz', `Dureza de calcio ${x.ca} ppm baja`);
+  if (high(x.ca, 'calcium_hardness', 9, P('calcium_hardness').warn[1])) dil(x.ca, T.calcium_hardness, 'Calcio');
+  if (low(x.salt, 'salt', 49) && x.salt < T.salt) push('Sal para piscina', ((T.salt - x.salt) / 100) * 8.34 * f, 'lb', `Sal ${x.salt} ppm baja (cuando lleve sal, espera y vuelve a medir)`);
+  if (high(x.salt, 'salt', 49, P('salt').warn[1])) dil(x.salt, T.salt, 'Sal');
   return out;
 }
 
@@ -171,6 +229,8 @@ const DEFAULT_SETTINGS = {
   },
   quote: { validDays: 15, accept: true, terms: 'Cotización sujeta a cambios si las condiciones de la piscina o los equipos son diferentes a lo inspeccionado.', footerText: 'Gracias por su interés en Elite Pool Service PR' },
   catalog: [],
+  chem: { ...DEFAULT_CHEM },
+  targets: { ...DEFAULT_TARGETS },
   report: {
     logo: false, showName: true, bizInfo: true, clientBlock: true, times: true, tech: true, readings: true, ideal: true, previous: true,
     summary: true, doses: true, equipment: false, checklist: true, notes: true, parts: true, photos: true, footer: true,
@@ -183,6 +243,8 @@ function mergeSettings(saved) {
     if (saved && Array.isArray(saved.catalog)) out.catalog = saved.catalog.filter((x) => x && x.name).map((x) => ({ name: String(x.name), price: +x.price || 0 }));
     for (const k of ['biz', 'pay', 'invoice', 'quote', 'report']) if (saved[k] && typeof saved[k] === 'object') Object.assign(out[k], saved[k]);
     if (saved.logo && saved.logo.data) out.logo = saved.logo;
+    if (saved.chem && typeof saved.chem === 'object') out.chem = chemPrefs(saved.chem);
+    if (saved.targets && typeof saved.targets === 'object') Object.keys(DEFAULT_TARGETS).forEach((k) => { const n = parseFloat(saved.targets[k]); if (!isNaN(n)) out.targets[k] = n; });
   }
   return out;
 }
@@ -892,4 +954,4 @@ async function processPhoto(file, kind, coords) {
   return { uri: cv.toDataURL('image/jpeg', 0.72), w, h };
 }
 
-if (typeof module !== 'undefined') module.exports = { propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
+if (typeof module !== 'undefined') module.exports = { SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };

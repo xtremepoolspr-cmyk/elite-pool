@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v19 · Foto con proporción correcta';
+const APP_VERSION = 'v20 · Calculadora de dosis';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -261,21 +261,28 @@ function routesTab() {
 /* --- lecturas (compartido con pestaña Químicos) --- */
 const draftOf = (key, r) => (UI.drafts[key] ||= Object.fromEntries(PARAMS.map((p) => [p.key, r && r[p.key] != null ? String(r[p.key]) : ''])));
 const numOf = (s) => (s === '' || s == null ? null : toNum(s));
-function sugHtml(key, gal, vals, ctx) {
+const numTargets = () => Object.fromEntries(Object.keys(DEFAULT_TARGETS).map((k) => [k, toNum(S.settings.targets[k])]).filter(([, v]) => v != null));
+function chemOpts(wbId) {
+  const w = wbId && find('waterBodies', wbId), p = w && find('properties', w.property_id);
+  return { prefs: chemPrefs(S.settings.chem, p && p.chem), targets: numTargets() };
+}
+function doseHtml(doses, applyBtn) {
+  return doses.map((d, i) => `<div class="it"><div class="grow"><b>${esc(d.chemical_name)}</b>${d.amount == null ? '' : `<div class="amt">${d.amount} ${d.unit}</div>`}${muted(esc(d.reason))}</div>${d.amount == null ? '' : applyBtn(d, i)}</div>`).join('');
+}
+function sugHtml(key, gal, vals, ctx, wbId) {
   const nums = Object.fromEntries(PARAMS.map((p) => [p.key, numOf(vals[p.key])]));
-  const doses = suggestDoses(nums, gal);
+  const doses = suggestDoses(nums, gal, chemOpts(wbId || (ctx && ctx.wb)));
   if (!doses.length) return '';
   const applied = ctx ? T('dosages').filter((d) => d.stop_id === ctx.stop && d.water_body_id === ctx.wb).map((d) => d.chemical_name) : [];
-  return `<div class="card dose"><b>Dosis sugerida (${gal.toLocaleString('es-PR')} gal)</b>${doses.map((d, i) => `<div class="it"><div class="grow"><b>${esc(d.chemical_name)}</b><div class="amt">${d.amount} ${d.unit}</div>${muted(esc(d.reason))}</div>
-    ${ctx ? btn(applied.includes(d.chemical_name) ? '✓ Aplicado' : 'Aplicar', 'applyDose', { key, i, stop: ctx.stop, wb: ctx.wb }, 'sm ' + (applied.includes(d.chemical_name) ? 'ok' : 'ghost')) : ''}</div>`).join('')}
+  return `<div class="card dose"><b>Dosis sugerida (${gal.toLocaleString('es-PR')} gal)</b>${doseHtml(doses, (d, i) => (ctx ? btn(applied.includes(d.chemical_name) ? '✓ Aplicado' : 'Aplicar', 'applyDose', { key, i, stop: ctx.stop, wb: ctx.wb }, 'sm ' + (applied.includes(d.chemical_name) ? 'ok' : 'ghost')) : ''))}
     ${muted('Estimado de campo: verifica la etiqueta del producto, aplica en dosis divididas si el ajuste es grande y vuelve a medir.', 'mt-s')}</div>`;
 }
-function readingForm(key, gal, vals, ctx, saveAct, saveData, saveLabel) {
+function readingForm(key, gal, vals, ctx, saveAct, saveData, saveLabel, wbId) {
   const fields = PARAMS.map((p) => {
     const lv = classify(p.key, numOf(vals[p.key]));
     return `<div class="fld"><label>${esc(p.label)}${p.unit ? ` (${p.unit})` : ''}</label><input id="rf_${key}_${p.key}" data-rf="${key}" data-p="${p.key}" inputmode="decimal" value="${esc(vals[p.key])}" placeholder="${p.ok[0]}–${p.ok[1]}" class="${lv ? 'lv-' + lv : ''}"><div class="lvl ${lv || ''}" id="lv_${key}_${p.key}">${lv ? '● ' + LEVEL_LABEL[lv] : ''}</div></div>`;
   }).join('');
-  return `<div class="g2">${fields}</div><div id="sg_${key}" data-gal="${gal}"${ctx ? ` data-stop="${ctx.stop}" data-wb="${ctx.wb}"` : ''}>${sugHtml(key, gal, vals, ctx)}</div>${btn(saveLabel, saveAct, saveData)}`;
+  return `<div class="g2">${fields}</div><div id="sg_${key}" data-gal="${gal}" data-wbp="${wbId || (ctx && ctx.wb) || ''}"${ctx ? ` data-stop="${ctx.stop}" data-wb="${ctx.wb}"` : ''}>${sugHtml(key, gal, vals, ctx, wbId)}</div>${btn(saveLabel, saveAct, saveData)}`;
 }
 
 function stopView(id) {
@@ -346,11 +353,11 @@ function clientView(id) {
     ${muted('Se guarda al instante. Los informes y facturas se envían con estas opciones en 1 solo toque.', 'mt')}</div>
     <div class="row between"><h2>Propiedades</h2>${btn('+ Propiedad', 'newProp', { c: c.id }, 'sm ghost')}</div>`;
   T('properties').filter((p) => p.client_id === c.id).forEach((p) => {
-    h += `<div class="card"><b>${esc(p.address)}</b>${muted(esc(p.municipality) + ' · Portón: ' + esc(p.gate_code || 'sin código'))}${muted('💵 ' + propFeeLabel(p, c))}${p.access_notes ? muted(esc(p.access_notes)) : ''}
+    h += `<div class="card"><b>${esc(p.address)}</b>${muted(esc(p.municipality) + ' · Portón: ' + esc(p.gate_code || 'sin código'))}${muted('💵 ' + propFeeLabel(p, c))}${muted('🧪 ' + SANITIZERS[chemPrefs(S.settings.chem, p.chem).sanitizer].name)}${p.access_notes ? muted(esc(p.access_notes)) : ''}
       <div class="mt-s"><b style="font-size:13px">Días de servicio de esta propiedad</b><div class="chips mt-s">${DAYS.map((n, i) => chip(DAYS_S[i], (p.service_days || []).includes(i), 'togglePropDay', { id: p.id, d: i })).join('')}</div></div>
       <div class="mt-s">${btn('📅 Airbnb / fechas específicas' + ((p.dates || []).length ? ` (${(p.dates || []).length})` : ''), 'openCal', { id: p.id }, 'sm ghost')}${(p.dates || []).filter((x) => x.d >= todayISO()).length ? muted('Próximas: ' + esc((p.dates || []).filter((x) => x.d >= todayISO()).slice(0, 4).map((x) => fmtDate(x.d).replace(/ \d{4}$/, '') + (x.t ? ' ' + fmtHM(x.t) : '')).join(' · ')) + ((p.dates || []).filter((x) => x.d >= todayISO()).length > 4 ? ' …' : ''), 'mt-s') : ''}</div>
       ${refBlock(p)}
-      <div class="btns">${btn('Editar', 'editProp', { id: p.id, c: c.id }, 'sm ghost')}${btn('🗑', 'delProp', { id: p.id }, 'sm ghost')}${btn('+ Cuerpo de agua', 'newWb', { p: p.id }, 'sm')}</div>`;
+      <div class="btns">${btn('🧪 Productos', 'propChem', { id: p.id }, 'sm ghost')}${btn('Editar', 'editProp', { id: p.id, c: c.id }, 'sm ghost')}${btn('🗑', 'delProp', { id: p.id }, 'sm ghost')}${btn('+ Cuerpo de agua', 'newWb', { p: p.id }, 'sm')}</div>`;
     T('waterBodies').filter((w) => w.property_id === p.id).forEach((w) => {
       h += `<div class="mt" style="padding-left:12px;border-left:3px solid ${COL.water}"><b>💧 ${esc(w.name)}</b> ${muted('· ' + w.gallons.toLocaleString('es-PR') + ' gal')}
         ${T('equipment').filter((e) => e.water_body_id === w.id).map((e) => `<div data-act="editEquip" data-id="${e.id}" style="padding:4px 0">⚙️ ${esc(e.category)}: ${esc(e.brand)} ${esc(e.model)} <b style="color:${e.status === 'OK' ? COL.ok : e.status === 'Atención' ? COL.warn : COL.bad}">[${esc(e.status)}]</b> <a data-act="delEquip" data-id="${e.id}" style="color:${COL.bad};margin-left:6px">eliminar</a></div>`).join('')}
@@ -434,13 +441,13 @@ function chemTab() {
   if (!UI.chem.clientId || !find('clients', UI.chem.clientId)) UI.chem.clientId = (clients[0] || {}).id || '';
   const wbs = T('waterBodies').filter((w) => T('properties').some((p) => p.id === w.property_id && p.client_id === UI.chem.clientId));
   const wb = wbs.find((w) => w.id === UI.chem.wbId) || wbs[0];
-  let h = muted('Cliente', 'mb') + '<div class="chips">' + clients.map((c) => chip(c.name, c.id === UI.chem.clientId, 'chemClient', { id: c.id })).join('') + '</div>';
+  let h = btn('🧮 Calculadora de dosis (con valores meta)', 'openCalc', {}, 'ghost') + '<div class="mt-s"></div>' + muted('Cliente', 'mb') + '<div class="chips">' + clients.map((c) => chip(c.name, c.id === UI.chem.clientId, 'chemClient', { id: c.id })).join('') + '</div>';
   if (!wb) return { title: 'Químicos', sub: 'Lecturas, dosis sugerida e historial', body: h + empty('Este cliente no tiene cuerpos de agua registrados.') };
   const gal = toNum(UI.chem.gal) || wb.gallons;
   h += muted('Cuerpo de agua', 'mb') + '<div class="chips">' + wbs.map((w) => chip(`${w.name} · ${w.gallons.toLocaleString('es-PR')} gal`, w.id === wb.id, 'chemWb', { id: w.id })).join('') + '</div>';
   h += fld('Volumen para el cálculo (galones)', input('chem_gal', UI.chem.gal, `inputmode="decimal" placeholder="${wb.gallons}"`));
   const key = `chem_${wb.id}_${UI.chem.n}`;
-  h += readingForm(key, gal, draftOf(key, null), null, 'saveChemReading', { key, wb: wb.id }, 'Guardar lectura en el historial');
+  h += readingForm(key, gal, draftOf(key, null), null, 'saveChemReading', { key, wb: wb.id }, 'Guardar lectura en el historial', wb.id);
   const hist = T('readings').filter((r) => r.water_body_id === wb.id).sort((a, b) => b.created_at.localeCompare(a.created_at));
   h += '<h2>Historial químico</h2>' + (hist.length ? hist.map((r) => `<div class="card"><b>${fmtDateTime(r.created_at)}</b>${muted(r.stop_id ? 'Tomada en una parada' : 'Lectura manual')}
     <div class="row wrap mt-s" style="gap:14px">${PARAMS.map((p) => (r[p.key] == null ? '' : `<div><div class="muted" style="font-size:11px">${esc(p.label)}</div><b style="color:${COL[classify(p.key, r[p.key])]}">${r[p.key]}</b></div>`)).join('')}</div></div>`).join('') : empty('Sin lecturas todavía.'));
@@ -666,6 +673,8 @@ function pdfView() {
     <h2>💳 Cobro con ATH Móvil Business</h2><div class="card">${fld('Enlace de pago ATH Móvil Business', `<input data-setv="pay.athLink" type="url" inputmode="url" autocapitalize="off" value="${esc(st.pay.athLink)}" placeholder="https://…">`)}${tx('pay.athPhone', 'Número ATH Móvil (opcional)', '939-405-7458')}${muted('Pega aquí tu enlace de ATH Móvil Business. Sale en la factura (PDF clicable y texto de WhatsApp) y en la pantalla de la factura. Si lo dejas vacío, solo se muestra el número.')}${st.pay.athLink ? `<div class="mt-s"><a href="${esc(athUrl(st))}" target="_blank" rel="noopener">Probar enlace ↗</a></div>` : ''}</div>
     <h2>👷 Equipo de trabajo</h2><div class="card">${tx('biz.team', 'Nombres separados por coma', 'Carlos, Luis')}${muted('Se usan en Compras para asignar quién compra o instala cada pieza. Si trabajas solo, déjalo con un nombre.')}</div>
     <h2>Datos del negocio</h2><div class="card">${tx('biz.name', 'Nombre')}${tx('biz.tagline', 'Lema (opcional)', 'Mantenimiento de piscinas')}${tx('biz.address', 'Dirección', 'Caguas, Puerto Rico')}${tx('biz.phone', 'Teléfono')}${tx('biz.email', 'Correo')}${tx('biz.regId', 'Registro / Núm. comerciante (opcional)')}${tx('biz.tech', 'Técnico por defecto (informe)')}</div>
+    <h2>🧪 Productos químicos que uso</h2><div class="card">${chemSelects(chemPrefs(st.chem), 'data-setv-chem')}${muted('Son los productos predeterminados para calcular dosis. Cada propiedad puede tener los suyos (botón 🧪 en la propiedad).', 'mt-s')}</div>
+    <h2>🎯 Valores meta predeterminados</h2><div class="card"><div class="g2">${PARAMS.map((p) => fld(p.label, `<input data-setv="targets.${p.key}" inputmode="decimal" value="${esc(st.targets[p.key])}">`)).join('')}</div></div>
     <h2 id="tpl_sec">🎨 Plantilla de factura y cotización</h2><div class="card"><div class="tplgrid">${DOC_TEMPLATES.map(([k, n, d]) => `<button class="tplc${st.invoice.template === k ? ' on' : ''}" data-act="setTemplate" data-v="${k}" style="--c:${esc(st.invoice.accent || '#0284c7')}">${tplMini(k)}<b>${n}</b><span>${d}</span></button>`).join('')}</div>
     ${muted('Color de acento (la Minimalista no usa color)', 'mt')}<div class="chips mt-s">${ACCENTS.map((c) => `<button class="swatch${(st.invoice.accent || '#0284c7') === c ? ' on' : ''}" data-act="setAccent" data-v="${c}" style="background:${c}" aria-label="${c}"></button>`).join('')}</div>${muted('Usa «👁 Factura» abajo para ver cómo queda.', 'mt-s')}</div>
     <h2>📝 Cotizaciones</h2><div class="card">${fld('Días de vigencia por defecto', `<input data-setv="quote.validDays" inputmode="numeric" value="${esc(st.quote.validDays)}">`)}${fld('Condiciones (salen al final del PDF)', `<textarea data-setv="quote.terms" style="min-height:70px">${esc(st.quote.terms)}</textarea>`)}${fld('Texto del pie', `<input data-setv="quote.footerText" value="${esc(st.quote.footerText)}">`)}<div class="chk"><span class="t">Línea de firma «Aceptada por»</span><label class="sw"><input type="checkbox" data-set="quote.accept"${st.quote.accept ? ' checked' : ''}><i></i></label></div></div>
@@ -750,7 +759,36 @@ const tplMini = (k) => {
   return `<div class="tm"><i style="display:block;height:5px;width:45%;background:#334155;border-radius:2px"></i><i style="display:block;height:3px;background:${ac};margin:5px 0"></i>${g}<i style="display:block;height:7px;background:${ac};margin:4px 0"></i>${g}</div>`;
 };
 
-const VIEW_FN = { stop: stopView, client: clientView, order: orderView, invoice: invoiceView, pdf: pdfView, quote: quoteView };
+/* --- calculadora de dosis --- */
+const calcState = () => (UI.calc ||= { propId: '', gal: '', vals: {}, targets: {}, prefs: null });
+function calcPrefs() { const c = calcState(), p = c.propId && find('properties', c.propId); return c.prefs || chemPrefs(S.settings.chem, p && p.chem); }
+function calcOutHtml() {
+  const c = calcState(), gal = toNum(c.gal);
+  if (!gal) return muted('Escribe los galones de la piscina para calcular.', 'mt');
+  const nums = Object.fromEntries(PARAMS.map((p) => [p.key, numOf(c.vals[p.key])]));
+  if (PARAMS.every((p) => nums[p.key] == null)) return muted('Escribe al menos una lectura del agua.', 'mt');
+  const tg = { ...numTargets(), ...Object.fromEntries(Object.entries(c.targets).map(([k, v]) => [k, toNum(v)]).filter(([, v]) => v != null)) };
+  const doses = suggestDoses(nums, gal, { prefs: calcPrefs(), targets: tg, exact: true });
+  if (!doses.length) return `<div class="card dose mt"><b>✅ Todo está en la meta</b>${muted('No hace falta agregar nada con estos valores.')}</div>`;
+  return `<div class="card dose mt"><b>Qué echarle (${gal.toLocaleString('es-PR')} gal)</b>${doseHtml(doses, () => '')}${muted('Estimado de campo: verifica la etiqueta del producto, aplica en dosis divididas si el ajuste es grande, deja circular y vuelve a medir. Con el agua en movimiento, no mezcles productos entre sí.', 'mt-s')}</div>`;
+}
+function chemSelects(prefsObj, attr, pre) {
+  return CHEM_CATS.map((c) => fld(c.l, `<select ${attr}="${c.k}">${pre ? `<option value="">${esc(pre(c))}</option>` : ''}${optList(Object.entries(c.list).map(([k, v]) => [k, v.name]), prefsObj[c.k])}</select>`)).join('');
+}
+function calcView() {
+  const c = calcState(), props = T('properties').filter((p) => { const cl = find('clients', p.client_id); return cl && cl.status === 'ACTIVE'; });
+  const propSel = `<select data-calcprop="1"><option value="">— Sin propiedad (valores generales) —</option>${optList(props.map((p) => [p.id, `${(find('clients', p.client_id) || {}).name} — ${p.address}`]), c.propId)}</select>`;
+  const tg = numTargets();
+  const body = `${muted('Escribe cómo está el agua, a dónde quieres llevarla y qué productos usas. Te digo cuánto echarle.')}
+    <div class="card">${fld('Propiedad (opcional: usa sus productos y su volumen)', propSel)}${fld('Galones de la piscina', `<input data-calc="gal" inputmode="decimal" value="${esc(c.gal)}" placeholder="Ej. 15000">`)}</div>
+    <h2>Lecturas actuales</h2><div class="card"><div class="g2">${PARAMS.map((p) => fld(`${p.label}${p.unit ? ' (' + p.unit + ')' : ''}`, `<input data-calc="v.${p.key}" inputmode="decimal" value="${esc(c.vals[p.key] ?? '')}" placeholder="${p.ok[0]}–${p.ok[1]}">`)).join('')}</div></div>
+    <h2>A dónde quiero llevarlos (meta)</h2><div class="card"><div class="g2">${PARAMS.map((p) => fld(p.label, `<input data-calc="t.${p.key}" inputmode="decimal" value="${esc(c.targets[p.key] ?? '')}" placeholder="${tg[p.key] ?? DEFAULT_TARGETS[p.key]}">`)).join('')}</div>${muted('Si lo dejas vacío usa la meta de Ajustes (por defecto: pH 7.4, cloro 3, alcalinidad 90, CYA 40, calcio 300, sal 3200).', 'mt-s')}</div>
+    <h2>Productos que uso</h2><div class="card">${chemSelects(calcPrefs(), 'data-calcp')}${muted('Se llenan con tus productos predeterminados (Ajustes) o los de la propiedad. Aquí puedes cambiarlos solo para este cálculo.', 'mt-s')}</div>
+    <div id="calc_out">${calcOutHtml()}</div>
+    <div class="mt"></div>${btn('Limpiar', 'calcReset', {}, 'ghost')}`;
+  return { title: '🧮 Calculadora de dosis', body };
+}
+const VIEW_FN = { calc: calcView, stop: stopView, client: clientView, order: orderView, invoice: invoiceView, pdf: pdfView, quote: quoteView };
 
 const bannerHtml = () => (!online() ? `<div class="banner off">Modo Offline Activo - Datos guardados localmente${S.queue.length ? ` (${S.queue.length} por sincronizar)` : ''}</div>` : S.queue.length ? `<div class="banner">${UI.syncing ? 'Sincronizando' : 'En cola de sincronización:'} ${S.queue.length} cambio(s)…</div>` : '');
 const page = (b) => `<div class="page" id="page">${b}</div>`;
@@ -963,6 +1001,13 @@ const A = {
       if (filled) set(`✓ Ubicación guardada (±${acc} m). Dirección sugerida: revísala y corrígela si hace falta.${weak}`);
     }
   },
+  openCalc: () => { UI.calc = null; go('calc', 'x'); },
+  calcReset: () => { UI.calc = null; render(); },
+  propChem: (d) => {
+    const p = find('properties', d.id); if (!p) return;
+    const def = chemPrefs(S.settings.chem), cur = p.chem || {};
+    openSheet('🧪 Productos de ' + p.address, `${muted('Elige qué productos usas en ESTA propiedad. Con «predeterminado» usa lo que pusiste en Ajustes.')}<div class="mt-s"></div>${CHEM_CATS.map((c) => fld(c.l, `<select data-pchem="${p.id}:${c.k}"><option value="">${esc('Predeterminado: ' + c.list[def[c.k]].name)}</option>${optList(Object.entries(c.list).map(([k, v]) => [k, v.name]), cur[c.k])}</select>`)).join('')}<div class="mt"></div>${btn('Listo', 'closeSheet')}`);
+  },
   openPdfSettings: () => go('pdf', 'x'),
   openTemplates: () => { go('pdf', 'x'); setTimeout(() => { const e = document.getElementById('tpl_sec'); if (e) e.scrollIntoView(); }, 60); },
   viewRef: (d) => { const p = find('properties', d.id); if (p && p.photo) openSheet(esc(p.address), `<img class="refbig" src="${p.photo.uri}" alt="">`); },
@@ -1067,8 +1112,8 @@ const A = {
   },
   applyDose: (d) => {
     const wb = find('waterBodies', d.wb), v = UI.drafts[d.key] || {};
-    const dose = suggestDoses(Object.fromEntries(PARAMS.map((p) => [p.key, numOf(v[p.key])])), wb.gallons)[+d.i];
-    if (!dose) return;
+    const dose = suggestDoses(Object.fromEntries(PARAMS.map((p) => [p.key, numOf(v[p.key])])), wb.gallons, chemOpts(d.wb))[+d.i];
+    if (!dose || dose.amount == null) return;
     const dup = T('dosages').find((x) => x.stop_id === d.stop && x.water_body_id === d.wb && x.chemical_name === dose.chemical_name);
     if (dup) remove('dosages', dup.id);
     else upsert('dosages', { id: uid('ds'), stop_id: d.stop, water_body_id: d.wb, chemical_name: dose.chemical_name, amount: dose.amount, unit: dose.unit });
@@ -1197,7 +1242,14 @@ function onInput(e) {
     const lb = document.getElementById(`lv_${key}_${t.dataset.p}`);
     if (lb) { lb.className = 'lvl ' + (lv || ''); lb.textContent = lv ? '● ' + LEVEL_LABEL[lv] : ''; }
     const sg = document.getElementById('sg_' + key);
-    if (sg) sg.innerHTML = sugHtml(key, +sg.dataset.gal, v, sg.dataset.stop ? { stop: sg.dataset.stop, wb: sg.dataset.wb } : null);
+    if (sg) sg.innerHTML = sugHtml(key, +sg.dataset.gal, v, sg.dataset.stop ? { stop: sg.dataset.stop, wb: sg.dataset.wb } : null, sg.dataset.wbp);
+  } else if (t.dataset.calc) {
+    const c = calcState(), [a, k] = t.dataset.calc.split('.');
+    if (a === 'gal') c.gal = t.value; else if (a === 'v') c.vals[k] = t.value; else c.targets[k] = t.value;
+    const o = document.getElementById('calc_out'); if (o) o.innerHTML = calcOutHtml();
+  } else if (t.dataset.calcp) {
+    const c = calcState(); c.prefs = { ...calcPrefs(), [t.dataset.calcp]: t.value };
+    const o = document.getElementById('calc_out'); if (o) o.innerHTML = calcOutHtml();
   } else if (t.dataset.ql) { const [i, k] = t.dataset.ql.split(':'); UI.qd.lines[+i][k] = t.value; const e = document.getElementById('q_tot'); if (e) e.textContent = money(qdTotal()); }
   else if (t.dataset.qp) UI.qd.prospect[t.dataset.qp] = t.value;
   else if (t.id === 'q_disc') { UI.qd.discount = t.value; const e = document.getElementById('q_tot'); if (e) e.textContent = money(qdTotal()); }
@@ -1205,7 +1257,8 @@ function onInput(e) {
   else if (t.id === 'q_notes') UI.qd.notes = t.value;
   else if (t.dataset.cat) { const [i, k] = t.dataset.cat.split(':'); const it = S.settings.catalog[+i]; if (it) { it[k] = k === 'price' ? toNum(t.value) || 0 : t.value; persist(); } }
   else if (t.id === 'cl_q') { UI.q = t.value; scheduleRender(); }
-  else if (t.id === 'chem_gal') { UI.chem.gal = t.value; const sg = document.querySelector('[id^="sg_chem_"]'); if (sg) { const wb = find('waterBodies', UI.chem.wbId) || T('waterBodies').find((w) => T('properties').some((p) => p.id === w.property_id && p.client_id === UI.chem.clientId)); const gal = toNum(t.value) || (wb && wb.gallons) || 0; sg.dataset.gal = gal; sg.innerHTML = sugHtml(sg.id.slice(3), gal, draftOf(sg.id.slice(3), null), null); } }
+  else if (t.id === 'chem_gal') { UI.chem.gal = t.value; const sg = document.querySelector('[id^="sg_chem_"]'); if (sg) { const wb = find('waterBodies', UI.chem.wbId) || T('waterBodies').find((w) => T('properties').some((p) => p.id === w.property_id && p.client_id === UI.chem.clientId)); const gal = toNum(t.value) || (wb && wb.gallons) || 0; sg.dataset.gal = gal; sg.innerHTML = sugHtml(sg.id.slice(3), gal, draftOf(sg.id.slice(3), null), null, sg.dataset.wbp); } }
+  else if (t.dataset.setvChem) { S.settings.chem[t.dataset.setvChem] = t.value; persist(); }
   else if (t.dataset.setv) { setPath(S.settings, t.dataset.setv, t.value); persist(); }
   else if (t.dataset.note) { const row = find('stops', t.dataset.note); if (row) { row.client_note = t.value; persist(); } }
   else if (t.id === 'm_subject') UI.msg.subject = t.value;
@@ -1222,6 +1275,15 @@ async function onChange(e) {
   } else if (t.dataset.cflag) { const c = find('clients', t.dataset.id); if (c) upsert('clients', { ...c, [t.dataset.cflag]: !t.checked });
   } else if (t.dataset.set) { setPath(S.settings, t.dataset.set, t.checked); persist(); }
   else if (t.dataset.note) { const row = find('stops', t.dataset.note); if (row) upsert('stops', { ...row, client_note: t.value }); }
+  else if (t.dataset.calcprop) {
+    const c = calcState(); c.propId = t.value; c.prefs = null;
+    const w = T('waterBodies').filter((x) => x.property_id === t.value);
+    if (w.length) c.gal = String(w.reduce((a, x) => a + (+x.gallons || 0), 0));
+    render();
+  } else if (t.dataset.pchem) {
+    const [pid, k] = t.dataset.pchem.split(':'), p = find('properties', pid);
+    if (p) { const chem = { ...(p.chem || {}) }; if (t.value) chem[k] = t.value; else delete chem[k]; upsert('properties', { ...p, chem }); toast('Guardado'); }
+  }
   else if (t.dataset.ref && t.files && t.files[0]) {
     const f = t.files[0]; t.value = '';
     try { const p = find('properties', t.dataset.ref); if (p) { upsert('properties', { ...p, photo: await processRef(f) }); toast('Foto guardada'); } } catch (err) { alert('No se pudo leer la imagen: ' + err.message); }
