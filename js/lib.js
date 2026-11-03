@@ -154,9 +154,12 @@ const DEFAULT_SETTINGS = {
   invoice: {
     logo: true, bizInfo: true, number: true, dates: true, clientInfo: true, itemType: true, subtotals: true,
     payBox: true, instructions: true, terms: true, stamp: true, footer: true,
+    template: 'classic', accent: '#0284c7',
     termsText: 'Pago dentro de 15 días a partir de la fecha de emisión. Gracias por su preferencia.',
     footerText: 'Gracias por confiar en Elite Pool Service PR',
   },
+  quote: { validDays: 15, accept: true, terms: 'Cotización sujeta a cambios si las condiciones de la piscina o los equipos son diferentes a lo inspeccionado.', footerText: 'Gracias por su interés en Elite Pool Service PR' },
+  catalog: [],
   report: {
     logo: false, bizInfo: true, clientBlock: true, times: true, tech: true, readings: true, ideal: true, previous: true,
     summary: true, doses: true, equipment: false, checklist: true, notes: true, parts: true, photos: true, footer: true,
@@ -166,7 +169,8 @@ const DEFAULT_SETTINGS = {
 function mergeSettings(saved) {
   const out = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
   if (saved && typeof saved === 'object') {
-    for (const k of ['biz', 'pay', 'invoice', 'report']) if (saved[k] && typeof saved[k] === 'object') Object.assign(out[k], saved[k]);
+    if (saved && Array.isArray(saved.catalog)) out.catalog = saved.catalog.filter((x) => x && x.name).map((x) => ({ name: String(x.name), price: +x.price || 0 }));
+    for (const k of ['biz', 'pay', 'invoice', 'quote', 'report']) if (saved[k] && typeof saved[k] === 'object') Object.assign(out[k], saved[k]);
     if (saved.logo && saved.logo.data) out.logo = saved.logo;
   }
   return out;
@@ -259,30 +263,56 @@ function buildPdf(title, lines, opts = {}) {
   const need = (h) => { if (y - h < BOTTOM) newPage(); };
 
   newPage();
-  // ----- encabezado (primera página) -----
+  // ----- encabezado (primera página; varía según la plantilla) -----
   const hd = opts.header || { name: 'Elite Pool Service PR', lines: [], label: '', meta: [] };
-  let leftBottom = y, x0 = M;
-  if (hd.logo) {
-    const sc = Math.min(150 / hd.logo.w, 62 / hd.logo.h), lw = hd.logo.w * sc, lh = hd.logo.h * sc;
-    drawImg(hd.logo, M, y, lw, lh); x0 = M + lw + 12; leftBottom = y - lh;
+  const th = opts.theme || { t: 'classic', acc: ACC }, AC = th.acc || ACC, WHITE = [1, 1, 1];
+  const lsz = th.t === 'elegant' ? 15 : 20;
+  const logoDims = (mw, mh) => { const sc = Math.min(mw / hd.logo.w, mh / hd.logo.h); return { lw: hd.logo.w * sc, lh: hd.logo.h * sc }; };
+  if (th.t === 'modern') {
+    let x0 = M, lh = 0;
+    if (hd.logo) { const d = logoDims(120, 56); lh = d.lh; x0 = M + d.lw + 20; }
+    const labW = hd.label ? tw(hd.label, lsz, true) + 18 : 0, leftMax = Math.max(120, W - M - labW - x0);
+    const nl = wrapLines(hd.name || '', 16, true, leftMax), bl = [];
+    (hd.lines || []).forEach((l) => wrapLines(l, 8.5, false, leftMax).forEach((ln) => bl.push(ln)));
+    const bandH = Math.max(86, 22 + nl.length * 19 + bl.length * 11 + 14, lh + 28);
+    rect(0, H - bandH, W, bandH, AC);
+    if (hd.logo) { const d = logoDims(120, 56); rect(M - 5, H - bandH / 2 - d.lh / 2 - 5, d.lw + 10, d.lh + 10, WHITE); drawImg(hd.logo, M, H - bandH / 2 + d.lh / 2, d.lw, d.lh); }
+    let ly = H - 30; nl.forEach((ln) => { text(ln, x0, ly, 16, true, WHITE); ly -= 19; });
+    bl.forEach((ln) => { text(ln, x0, ly + 3, 8.5, false, [0.9, 0.96, 1]); ly -= 11; });
+    if (hd.label) text(hd.label, W - M - tw(hd.label, lsz, true), H - 38, lsz, true, WHITE);
+    let ry = H - bandH - 18;
+    (hd.meta || []).forEach(([k, v]) => { const s = `${k}  ${v}`; text(s, W - M - tw(s, 9, false), ry, 9, false, INK); ry -= 12; });
+    y = Math.min(ry, H - bandH - 12) - 6;
+  } else if (th.t === 'elegant') {
+    y = H - M + 6;
+    if (hd.logo) { const d = logoDims(170, 62); drawImg(hd.logo, (W - d.lw) / 2, y, d.lw, d.lh); y -= d.lh + 8; }
+    wrapLines(hd.name || '', 18, true, CW).forEach((ln) => { text(ln, (W - tw(ln, 18, true)) / 2, y - 16, 18, true, INK); y -= 22; });
+    (hd.lines || []).forEach((l) => wrapLines(l, 8.5, false, CW).forEach((ln) => { text(ln, (W - tw(ln, 8.5, false)) / 2, y - 9, 8.5, false, GREY); y -= 11; }));
+    y -= 8; rect(M + CW * 0.3, y, CW * 0.4, 1.4, AC); y -= 20;
+    if (hd.label) { text(hd.label, (W - tw(hd.label, lsz, true)) / 2, y - 12, lsz, true, AC); y -= 26; }
+    const ms = (hd.meta || []).map(([k, v]) => `${k} ${v}`).join('   ·   ');
+    wrapLines(ms, 9, false, CW).forEach((ln) => { text(ln, (W - tw(ln, 9, false)) / 2, y - 8, 9, false, INK); y -= 12; });
+    y -= 4; hline(y, LINE); y -= 16;
+  } else {
+    let leftBottom = y, x0 = M;
+    if (hd.logo) { const d = logoDims(150, 62); drawImg(hd.logo, M, y, d.lw, d.lh); x0 = M + d.lw + 12; leftBottom = y - d.lh; }
+    let ly = y - 13;
+    const labW = hd.label ? tw(hd.label, 20, true) + 18 : 0, leftMax = Math.max(120, CW - labW - (x0 - M));
+    wrapLines(hd.name || '', 15, true, leftMax).forEach((ln) => { text(ln, x0, ly, 15, true, INK); ly -= 17; });
+    (hd.lines || []).forEach((l) => wrapLines(l, 8.5, false, leftMax).forEach((ln) => { text(ln, x0, ly, 8.5, false, GREY); ly -= 11; }));
+    leftBottom = Math.min(leftBottom, ly + 6);
+    let ry = y - 20;
+    if (hd.label) { text(hd.label, W - M - tw(hd.label, 20, true), ry, 20, true, AC); ry -= 20; }
+    (hd.meta || []).forEach(([k, v]) => { const s = `${k}  ${v}`; text(s, W - M - tw(s, 9, false), ry, 9, false, INK); ry -= 12; });
+    y = Math.min(leftBottom, ry) - 8;
+    rect(M, y, CW, th.t === 'minimal' ? 1 : 3, AC); y -= 18;
   }
-  let ly = y - 13;
-  const labW = hd.label ? tw(hd.label, 20, true) + 18 : 0, leftMax = Math.max(120, CW - labW - (x0 - M));
-  const nameLines = wrapLines(hd.name || '', 15, true, leftMax);
-  nameLines.forEach((ln) => { text(ln, x0, ly, 15, true, INK); ly -= 17; });
-  (hd.lines || []).forEach((l) => wrapLines(l, 8.5, false, leftMax).forEach((ln) => { text(ln, x0, ly, 8.5, false, GREY); ly -= 11; }));
-  leftBottom = Math.min(leftBottom, ly + 6);
-  let ry = y - 20;
-  if (hd.label) { const lw = tw(hd.label, 20, true); text(hd.label, W - M - lw, ry, 20, true, ACC); ry -= 20; }
-  (hd.meta || []).forEach(([k, v]) => { const s = `${k}  ${v}`; text(s, W - M - tw(s, 9, false), ry, 9, false, INK); ry -= 12; });
-  y = Math.min(leftBottom, ry) - 8;
-  rect(M, y, CW, 3, ACC); y -= 18;
 
   // ----- contenido -----
   for (const it of lines) {
     if (it.space) { y -= it.space; continue; }
     if (it.rule) { need(8); hline(y - 2); y -= 8; continue; }
-    if (it.bar) { need(it.keep || 70); rect(M, y - 18, CW, 18, it.c || ACC); text(it.bar, M + 8, y - 13, 10.5, true, [1, 1, 1]); y -= 24; continue; }
+    if (it.bar) { need(it.keep || 70); rect(M, y - 18, CW, 18, it.c || AC); text(it.bar, M + 8, y - 13, 10.5, true, [1, 1, 1]); y -= 24; continue; }
     if (it.row) {
       const size = it.size || 10, pad = it.pad ?? 4, lh = size * 1.3;
       const xs = []; let x = M; it.row.forEach((c) => { xs.push(x); x += c.w * CW; });
@@ -396,6 +426,21 @@ const LV_TXT = { ok: '• En rango', warn: '• Precaución', bad: '• Crítico
 
 function bizLines(b) {
   return [b.tagline, b.address, b.phone && `Tel. ${b.phone}`, b.email, b.regId && `Reg.: ${b.regId}`].filter(Boolean);
+}
+/* ---------- plantillas de factura / cotización ---------- */
+const DOC_TEMPLATES = [
+  ['classic', 'Clásica', 'Línea de color arriba y barras de color. La de siempre.'],
+  ['modern', 'Moderna', 'Banda de color arriba con tu nombre en blanco.'],
+  ['minimal', 'Minimalista', 'Sin colores: blanco y negro con líneas finas. Ahorra tinta.'],
+  ['elegant', 'Elegante', 'Todo centrado: logo, nombre y datos al centro.'],
+];
+const ACCENTS = ['#0284c7', '#0d9488', '#16a34a', '#7c3aed', '#be123c', '#ea580c', '#0f172a'];
+const hexRgb = (h) => { const m = /^#?([0-9a-f]{6})$/i.exec(String(h || '').trim()); return m ? [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16) / 255) : null; };
+const mixW = (c, k) => c.map((v) => v + (1 - v) * k);
+function docTheme(cfg) {
+  const o = cfg.invoice, t = DOC_TEMPLATES.some((x) => x[0] === o.template) ? o.template : 'classic';
+  const acc = t === 'minimal' ? [0.1, 0.1, 0.12] : hexRgb(o.accent) || ACC;
+  return { t, acc, flat: t === 'minimal', soft: t === 'minimal' ? [0.97, 0.97, 0.97] : mixW(acc, 0.93), edge: t === 'minimal' ? [0.82, 0.82, 0.84] : mixW(acc, 0.7) };
 }
 function pdfHeader(cfg, key, label, meta) {
   const o = cfg[key];
@@ -522,7 +567,7 @@ function buildStopDoc(db, stopId, cfgIn) {
 }
 
 function buildInvoiceDoc(client, inv, cfgIn, db) {
-  const cfg = cfgIn || mergeSettings(null), o = cfg.invoice;
+  const cfg = cfgIn || mergeSettings(null), o = cfg.invoice, th = docTheme(cfg);
   const today = todayISO(), st = effectiveStatus(inv, today), num = invNumber(inv, db);
   const prop = db ? db.properties.find((p) => p.client_id === client.id) : null;
   let text = `🧾 *${cfg.biz.name}* — Factura ${o.number ? 'N° ' + num : inv.period}\nCliente: ${client.name}\nVence: ${fmtDate(inv.due_date)}\n\n`;
@@ -540,7 +585,7 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
   const head = [{ t: '#', w: cols[0] }, { t: 'Descripción', w: cols[1] }];
   if (o.itemType) head.push({ t: 'Tipo', w: cols[2] });
   head.push({ t: 'Monto', w: cols[3], align: 'right' });
-  L.push({ size: 9, pad: 5, bg: ACC, b: true, c: [1, 1, 1], row: head });
+  L.push(th.flat ? { size: 9, pad: 5, b: true, c: INK, line: true, row: head } : { size: 9, pad: 5, bg: th.acc, b: true, c: [1, 1, 1], row: head });
   inv.lines.forEach((l, i) => {
     const r = [{ t: String(i + 1), w: cols[0], c: GREY }, { t: l.description, w: cols[1] }];
     if (o.itemType) r.push({ t: KIND[l.kind] || l.kind, w: cols[2], c: GREY });
@@ -556,19 +601,19 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
     });
     L.push({ space: 4 });
   }
-  L.push({ size: 13, pad: 7, bg: ACC, b: true, c: [1, 1, 1], row: [{ t: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', w: 0.7 }, { t: money(inv.total_amount), w: 0.3, align: 'right' }] }, { space: 12 });
+  L.push({ size: 13, pad: 7, ...(th.flat ? { c: INK, line: true } : { bg: th.acc, c: [1, 1, 1] }), b: true, row: [{ t: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', w: 0.7 }, { t: money(inv.total_amount), w: 0.3, align: 'right' }] }, { space: 12 });
   if (o.payBox) {
     const rows = [{ t: 'MÉTODO DE PAGO', size: 8.5, b: true, c: GREY }, { t: PAYMENT_LABEL[inv.payment_method] || inv.payment_method, size: 11, b: true }];
     if (inv.status === 'PAID') rows.push({ t: 'Pago recibido. ¡Gracias!', size: 10, c: LC.ok, b: true });
     else {
       if (inv.payment_method === 'ATH_MOVIL') {
         const link = athUrl(cfg), ph = (cfg.pay.athPhone || '').trim();
-        if (link) rows.push({ t: 'Pagar con ATH Móvil Business (toque el enlace):', size: 10, b: true }, { t: link, size: 10.5, b: true, c: ACC, link });
-        if (ph) rows.push({ t: `ATH Móvil Business: ${ph}`, size: link ? 10 : 15, b: true, c: link ? INK : ACC });
+        if (link) rows.push({ t: 'Pagar con ATH Móvil Business (toque el enlace):', size: 10, b: true }, { t: link, size: 10.5, b: true, c: th.acc, link });
+        if (ph) rows.push({ t: `ATH Móvil Business: ${ph}`, size: link ? 10 : 15, b: true, c: link ? INK : th.acc });
       }
       if (o.instructions && !(inv.payment_method === 'ATH_MOVIL')) rows.push({ t: paymentInstructions(inv.payment_method, cfg), size: 9.5, c: GREY });
     }
-    L.push({ panel: { rows } });
+    L.push({ panel: { rows, bg: th.soft, border: th.edge } });
   } else if (o.instructions && inv.status !== 'PAID') L.push({ t: paymentInstructions(inv.payment_method, cfg), size: 10 });
   if (o.terms && o.termsText && o.termsText.trim()) L.push({ space: 4 }, { t: 'TÉRMINOS', size: 8.5, b: true, c: GREY }, { t: o.termsText.trim(), size: 9, c: GREY });
 
@@ -580,7 +625,56 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
   return {
     title: `Factura ${inv.period} — ${cfg.biz.name}`, text, lines: L,
     fileName: `factura-${inv.period}-${client.name.replace(/\W+/g, '-')}.pdf`,
-    opts: { header: pdfHeader(cfg, 'invoice', 'FACTURA', meta), footer: o.footer ? o.footerText : '', stamp },
+    opts: { header: pdfHeader(cfg, 'invoice', 'FACTURA', meta), footer: o.footer ? o.footerText : '', stamp, theme: th },
+  };
+}
+
+
+/* ---------- cotizaciones ---------- */
+const QUOTE_LABEL = { DRAFT: 'Borrador', SENT: 'Enviada', APPROVED: 'Aprobada', REJECTED: 'Rechazada', EXPIRED: 'Vencida' };
+const r2 = (n) => Math.round((+n || 0) * 100) / 100;
+function quoteTotals(q) {
+  const sub = r2((q.lines || []).reduce((s, l) => s + (+l.qty || 0) * (+l.price || 0), 0)), disc = Math.min(r2(q.discount), sub);
+  return { sub, disc, total: r2(sub - disc) };
+}
+const quoteStatus = (q, today = todayISO()) => ((q.status === 'DRAFT' || q.status === 'SENT') && q.valid_until && q.valid_until < today ? 'EXPIRED' : q.status);
+function nextQuoteNumber(db) {
+  const p = todayISO().slice(0, 7).replace('-', ''), n = db.quotes.filter((q) => (q.number || '').startsWith(`COT-${p}`)).length + 1;
+  return `COT-${p}-${String(n).padStart(3, '0')}`;
+}
+function quoteWho(q, db) {
+  const c = q.client_id && db.clients.find((x) => x.id === q.client_id);
+  if (c) { const p = db.properties.find((x) => x.client_id === c.id); return { name: c.name, phone: c.phone, email: c.email, address: p ? `${p.address}${p.municipality ? ', ' + p.municipality : ''}` : '', client: c }; }
+  const pr = q.prospect || {};
+  return { name: pr.name || 'Cliente', phone: pr.phone || '', email: pr.email || '', address: pr.address || '', client: null };
+}
+function buildQuoteDoc(q, cfgIn, db) {
+  const cfg = cfgIn || mergeSettings(null), th = docTheme(cfg), qs = cfg.quote, w = quoteWho(q, db), t = quoteTotals(q), st = quoteStatus(q);
+  let text = `📝 *${cfg.biz.name}* — Cotización N° ${q.number}\nPara: ${w.name}\nFecha: ${fmtDate(q.created_at)}\nVálida hasta: ${fmtDate(q.valid_until)}\n\n`;
+  text += q.lines.map((l) => `• ${l.description}${+l.qty !== 1 ? ` (${l.qty} × ${money(l.price)})` : ''}: ${money((+l.qty || 0) * (+l.price || 0))}`).join('\n');
+  if (t.disc > 0) text += `\n\nSubtotal: ${money(t.sub)}\nDescuento: -${money(t.disc)}`;
+  text += `\n\n*Total: ${money(t.total)}*`;
+  if (q.notes && q.notes.trim()) text += `\n\n${q.notes.trim()}`;
+  text += `\n\nPara aprobarla, responde a este mensaje.${qs.footerText ? '\n' + qs.footerText : ''}`;
+  const L = [{ t: 'PREPARADA PARA', size: 8.5, b: true, c: GREY }, { t: w.name, size: 12, b: true }];
+  [w.phone && `Tel. ${w.phone}`, w.email, w.address].filter(Boolean).forEach((x) => L.push({ t: x, size: 9.5, c: GREY }));
+  L.push({ space: 10 });
+  const cols = [0.06, 0.46, 0.1, 0.18, 0.2];
+  L.push(th.flat ? { size: 9, pad: 5, b: true, c: INK, line: true, row: [{ t: '#', w: cols[0] }, { t: 'Descripción', w: cols[1] }, { t: 'Cant.', w: cols[2], align: 'right' }, { t: 'Precio', w: cols[3], align: 'right' }, { t: 'Importe', w: cols[4], align: 'right' }] }
+    : { size: 9, pad: 5, bg: th.acc, b: true, c: [1, 1, 1], row: [{ t: '#', w: cols[0] }, { t: 'Descripción', w: cols[1] }, { t: 'Cant.', w: cols[2], align: 'right' }, { t: 'Precio', w: cols[3], align: 'right' }, { t: 'Importe', w: cols[4], align: 'right' }] });
+  q.lines.forEach((l, i) => L.push({ size: 10, pad: 6, line: true, bg: i % 2 ? [0.975, 0.98, 0.99] : null, row: [{ t: String(i + 1), w: cols[0], c: GREY }, { t: l.description, w: cols[1] }, { t: String(+l.qty || 0), w: cols[2], align: 'right' }, { t: money(l.price), w: cols[3], align: 'right' }, { t: money((+l.qty || 0) * (+l.price || 0)), w: cols[4], align: 'right', b: true }] }));
+  L.push({ space: 8 });
+  if (t.disc > 0) L.push({ size: 10, pad: 2, row: [{ t: '', w: 0.6 }, { t: 'Subtotal', w: 0.2, align: 'right', c: GREY }, { t: money(t.sub), w: 0.2, align: 'right' }] }, { size: 10, pad: 2, row: [{ t: '', w: 0.6 }, { t: 'Descuento', w: 0.2, align: 'right', c: GREY }, { t: '-' + money(t.disc), w: 0.2, align: 'right' }] }, { space: 4 });
+  L.push({ size: 13, pad: 7, ...(th.flat ? { c: INK, line: true } : { bg: th.acc, c: [1, 1, 1] }), b: true, row: [{ t: 'TOTAL', w: 0.7 }, { t: money(t.total), w: 0.3, align: 'right' }] }, { space: 12 });
+  L.push({ panel: { rows: [{ t: 'VIGENCIA', size: 8.5, b: true, c: GREY }, { t: `Válida hasta el ${fmtDate(q.valid_until)}`, size: 12, b: true, c: th.acc }], bg: th.soft, border: th.edge } });
+  if (q.notes && q.notes.trim()) L.push({ space: 4 }, { t: 'NOTAS', size: 8.5, b: true, c: GREY }, { t: q.notes.trim(), size: 10 });
+  if (qs.terms && qs.terms.trim()) L.push({ space: 6 }, { t: 'CONDICIONES', size: 8.5, b: true, c: GREY }, { t: qs.terms.trim(), size: 9, c: GREY });
+  if (qs.accept) L.push({ space: 26 }, { t: 'Aceptada por: ______________________________     Fecha: ________________', size: 10 });
+  const meta = [['N°', q.number], ['Fecha', fmtDate(q.created_at)], ['Vigencia', fmtDate(q.valid_until)], ['Estado', QUOTE_LABEL[st]]];
+  return {
+    title: `Cotización ${q.number} — ${cfg.biz.name}`, text, lines: L,
+    fileName: `cotizacion-${q.number}-${w.name.replace(/\W+/g, '-')}.pdf`,
+    opts: { header: pdfHeader(cfg, 'invoice', 'COTIZACIÓN', meta), footer: qs.footerText || '', theme: th },
   };
 }
 
@@ -714,7 +808,9 @@ function backupSheets(db) {
     const w = db.waterBodies.find((x) => x.id === r.water_body_id) || {}, p = db.properties.find((x) => x.id === w.property_id) || {};
     lecturas.push([(r.created_at || '').slice(0, 10), cname(p.client_id), w.name || '', r.free_chlorine ?? '', r.ph ?? '', r.alkalinity ?? '', r.cyanuric_acid ?? '', r.salt ?? '', r.calcium_hardness ?? '']);
   });
-  return [{ name: 'Clientes', rows: clientes }, { name: 'Propiedades', rows: props }, { name: 'Facturas', rows: facturas }, { name: 'Lecturas químicas', rows: lecturas }];
+  const cot = [['Número', 'Cliente / prospecto', 'Teléfono', 'Fecha', 'Vigencia', 'Total', 'Estado']];
+  db.quotes.forEach((q) => { const w = quoteWho(q, db); cot.push([q.number, w.name + (q.client_id ? '' : ' (prospecto)'), w.phone, (q.created_at || '').slice(0, 10), q.valid_until, quoteTotals(q).total, QUOTE_LABEL[quoteStatus(q)]]); });
+  return [{ name: 'Clientes', rows: clientes }, { name: 'Propiedades', rows: props }, { name: 'Cotizaciones', rows: cot }, { name: 'Facturas', rows: facturas }, { name: 'Lecturas químicas', rows: lecturas }];
 }
 
 /* ---------- ubicación y fotos con sello ---------- */
@@ -772,4 +868,4 @@ async function processPhoto(file, kind, coords) {
   return { uri: cv.toDataURL('image/jpeg', 0.72), w, h };
 }
 
-if (typeof module !== 'undefined') module.exports = { feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
+if (typeof module !== 'undefined') module.exports = { buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
