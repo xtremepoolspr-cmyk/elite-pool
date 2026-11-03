@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v18 · Precio por propiedad';
+const APP_VERSION = 'v19 · Foto con proporción correcta';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -965,7 +965,7 @@ const A = {
   },
   openPdfSettings: () => go('pdf', 'x'),
   openTemplates: () => { go('pdf', 'x'); setTimeout(() => { const e = document.getElementById('tpl_sec'); if (e) e.scrollIntoView(); }, 60); },
-  viewRef: (d) => { const p = find('properties', d.id); if (p && p.photo) openSheet(esc(p.address), `<img src="${p.photo.uri}" style="width:100%;border-radius:12px" alt="">`); },
+  viewRef: (d) => { const p = find('properties', d.id); if (p && p.photo) openSheet(esc(p.address), `<img class="refbig" src="${p.photo.uri}" alt="">`); },
   delRef: (d) => { const p = find('properties', d.id); if (p && confirm('¿Quitar la foto de esta propiedad?')) { const q = { ...p }; delete q.photo; upsert('properties', q); } },
   delLogo: () => { S.settings.logo = null; persist(); render(); },
   resetPdf: () => { if (confirm('Se restauran las opciones de PDF (el logo y los datos del negocio se conservan).')) { const d = mergeSettings(null); S.settings.invoice = d.invoice; S.settings.report = d.report; persist(); render(); } },
