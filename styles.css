@@ -118,3 +118,12 @@ a{color:var(--water);font-weight:600;text-decoration:none}
 .cd{min-height:44px;border-radius:10px;background:#fff;border:1.5px solid var(--border);font-weight:700;font-size:15px}
 .cd.td{border-color:var(--water);color:var(--water)}
 .cd.on{background:var(--water);border-color:var(--water);color:#fff}
+
+/* plantillas y colores */
+.tplgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.tplc{display:flex;flex-direction:column;align-items:stretch;text-align:left;gap:4px;padding:8px;border:2px solid var(--border);border-radius:12px;background:#fff}
+.tplc.on{border-color:var(--water);box-shadow:0 0 0 2px rgba(2,132,199,.2)}
+.tplc b{font-size:14px}.tplc span{font-size:11px;color:var(--muted);line-height:1.25}
+.tm{background:#fff;border:1px solid var(--border);border-radius:6px;padding:6px;height:78px;overflow:hidden}
+.swatch{width:38px;height:38px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 0 1.5px var(--border)}
+.swatch.on{box-shadow:0 0 0 3px var(--slate)}
