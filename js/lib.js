@@ -134,18 +134,46 @@ function haversineKm(a, b) {
   return 2 * R * Math.asin(Math.sqrt(s));
 }
 function optimizeOrder(stops, props, start = DEPOT) {
-  const pool = stops.map((s) => ({ s, p: props.find((p) => p.id === s.property_id) }));
-  const order = [];
-  let cur = start;
-  while (pool.length) {
-    let best = 0, bestD = Infinity;
-    pool.forEach((x, i) => { const d = x.p ? haversineKm(cur, x.p) : Infinity; if (d < bestD) { bestD = d; best = i; } });
-    const [picked] = pool.splice(best, 1);
-    order.push(picked.s.id);
-    if (picked.p) cur = picked.p;
+  const items = stops.map((s) => ({ s, p: props.find((p) => p.id === s.property_id) }));
+  const withP = items.filter((x) => x.p), noP = items.filter((x) => !x.p);
+  const pts = [start, ...withP.map((x) => x.p)];
+  const d = (i, j) => haversineKm(pts[i], pts[j]);
+  // 1) vecino más cercano desde el punto de inicio (índice 0)
+  const left = withP.map((_, i) => i + 1), tour = [0];
+  while (left.length) {
+    let bi = 0, bd = Infinity; const cur = tour[tour.length - 1];
+    left.forEach((n, i) => { const dd = d(cur, n); if (dd < bd) { bd = dd; bi = i; } });
+    tour.push(left.splice(bi, 1)[0]);
   }
-  return order;
+  // 1b) con pocas paradas (≤ 12) se calcula el orden EXACTO más corto (programación dinámica Held-Karp, ruta abierta)
+  const n = withP.length;
+  if (n >= 3 && n <= 12) {
+    const FULL = 1 << n, INF = 1e18, dp = new Float64Array(FULL * n).fill(INF), par = new Int8Array(FULL * n).fill(-1);
+    for (let i = 0; i < n; i++) dp[(1 << i) * n + i] = d(0, i + 1);
+    for (let m = 1; m < FULL; m++) for (let last = 0; last < n; last++) {
+      const cur = dp[m * n + last]; if (cur >= INF || !(m & (1 << last))) continue;
+      for (let nx = 0; nx < n; nx++) { if (m & (1 << nx)) continue; const nm = m | (1 << nx), v = cur + d(last + 1, nx + 1); if (v < dp[nm * n + nx]) { dp[nm * n + nx] = v; par[nm * n + nx] = last; } }
+    }
+    let bl = 0, bv = INF; for (let i = 0; i < n; i++) if (dp[(FULL - 1) * n + i] < bv) { bv = dp[(FULL - 1) * n + i]; bl = i; }
+    const seq = []; let m = FULL - 1, c = bl; while (c !== -1) { seq.push(c); const p = par[m * n + c]; m &= ~(1 << c); c = p; }
+    return [...seq.reverse().map((i) => withP[i].s.id), ...noP.map((x) => x.s.id)];
+  }
+  // 2) mejora 2-opt (ruta abierta: el inicio queda fijo, el final es libre) para ahorrar km
+  let improved = true, guard = 0;
+  while (improved && guard++ < 50) {
+    improved = false;
+    for (let i = 1; i < tour.length - 1; i++) {
+      for (let j = i + 1; j < tour.length; j++) {
+        const a = tour[i - 1], b = tour[i], c = tour[j], e = j + 1 < tour.length ? tour[j + 1] : null;
+        const delta = d(a, c) + (e != null ? d(b, e) : 0) - d(a, b) - (e != null ? d(c, e) : 0);
+        if (delta < -1e-9) { tour.splice(i, j - i + 1, ...tour.slice(i, j + 1).reverse()); improved = true; }
+      }
+    }
+  }
+  return [...tour.slice(1).map((n) => withP[n - 1].s.id), ...noP.map((x) => x.s.id)];
 }
+/** Longitud total (km) de una ruta abierta desde `start`. */
+function routeKm(orderProps, start = DEPOT) { let cur = start, t = 0; orderProps.forEach((p) => { t += haversineKm(cur, p); cur = p; }); return t; }
 const navUrl = (p) => `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lng}&travelmode=driving`;
 function routeUrl(props) {
   if (!props.length) return null;
@@ -906,19 +934,31 @@ function getCoords(timeout = 8000) {
     navigator.geolocation.getCurrentPosition(
       (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
       () => resolve(null),
-      { enableHighAccuracy: false, timeout, maximumAge: 60000 },
+      { enableHighAccuracy: true, timeout, maximumAge: 15000 },
     );
   });
 }
 
 /** Ubicación precisa (GPS de alta precisión) con la exactitud en metros. */
-function getFix(timeout = 20000) {
+function getFix(timeout = 20000, opts = {}) {
+  // Escucha el GPS varios segundos y se queda con la lectura más precisa (la primera suele ser mala).
+  const goal = opts.goal || 8, onProgress = opts.onProgress;
   return new Promise((resolve) => {
     if (!navigator.geolocation) return resolve({ err: 'unsupported' });
-    navigator.geolocation.getCurrentPosition(
-      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy }),
-      (e) => resolve({ err: e && e.code === 1 ? 'denied' : 'unavailable' }),
-      { enableHighAccuracy: true, timeout, maximumAge: 0 },
+    let best = null, done = false, id = null, timer = null, settle = null;
+    const finish = (r) => { if (done) return; done = true; if (id != null) navigator.geolocation.clearWatch(id); clearTimeout(timer); clearTimeout(settle); resolve(r); };
+    const ok = () => finish({ lat: best.lat, lng: best.lng, acc: best.acc });
+    timer = setTimeout(() => (best ? ok() : finish({ err: 'unavailable' })), timeout);
+    id = navigator.geolocation.watchPosition(
+      (p) => {
+        const c = { lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy };
+        if (!best || c.acc < best.acc) best = c;
+        if (onProgress) onProgress(best);
+        if (best.acc <= goal) return ok();
+        clearTimeout(settle); settle = setTimeout(() => { if (best && best.acc <= 25) ok(); }, 6000);
+      },
+      (e) => { if (e && e.code === 1) finish({ err: 'denied' }); else if (!best) { /* sigue intentando hasta el tiempo límite */ } },
+      { enableHighAccuracy: true, timeout: timeout, maximumAge: 0 },
     );
   });
 }
@@ -954,4 +994,4 @@ async function processPhoto(file, kind, coords) {
   return { uri: cv.toDataURL('image/jpeg', 0.72), w, h };
 }
 
-if (typeof module !== 'undefined') module.exports = { SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
+if (typeof module !== 'undefined') module.exports = { routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };

@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v20 · Calculadora de dosis';
+const APP_VERSION = 'v21 · GPS preciso y ruta desde tu ubicación';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -986,10 +986,10 @@ const A = {
     const la = document.querySelector('#frm [name="lat"]'), ln = document.querySelector('#frm [name="lng"]');
     if (!la || !ln) return;
     set('Buscando señal GPS… espera unos segundos.');
-    const f = await getFix(20000);
+    const f = await getFix(30000, { goal: 8, onProgress: (b) => set(`Afinando señal GPS… precisión actual ±${Math.round(b.acc)} m (espera hasta que baje de 10 m)`) });
     if (f.err) return set(f.err === 'denied' ? 'Chrome no tiene permiso de ubicación. Toca el candado junto a la dirección → Permisos → Ubicación → Permitir.' : 'No se pudo obtener la ubicación. Revisa que el GPS del teléfono esté encendido y sal a cielo abierto.');
     la.value = f.lat.toFixed(6); ln.value = f.lng.toFixed(6);
-    const acc = Math.round(f.acc), weak = acc > 30 ? ' Precisión baja: aléjate de techos o árboles y vuelve a tocar el botón.' : '';
+    const acc = Math.round(f.acc), weak = acc > 20 ? ' Precisión baja: aléjate de techos o árboles y vuelve a tocar el botón.' : '';
     set(`✓ Ubicación guardada (precisión ±${acc} m).${weak}`);
     if (!online()) return;
     const ad = document.querySelector('#frm [name="address"]'), mu = document.querySelector('#frm [name="municipality"]');
@@ -1066,10 +1066,20 @@ const A = {
     const p = find('properties', d.id), n = +d.d, cur = p.service_days || [];
     upsert('properties', { ...p, service_days: cur.includes(n) ? cur.filter((x) => x !== n) : [...cur, n].sort() });
   },
-  optimize: () => {
+  optimize: async () => {
     const stops = routeStops(curRoute()), fixed = stops.filter((s) => s.status !== 'PENDING'), pend = stops.filter((s) => s.status === 'PENDING');
-    [...fixed.map((s) => s.id), ...optimizeOrder(pend, T('properties'))].forEach((id, i) => { const s = find('stops', id); if (s.order_index !== i) upsert('stops', { ...s, order_index: i }); });
-    toast('Ruta optimizada por cercanía');
+    if (!pend.length) return toast('No hay paradas pendientes');
+    toast('Buscando tu ubicación…');
+    const f = await getFix(12000, { goal: 20 });
+    let start = null, src = '';
+    if (!f.err) { start = { lat: f.lat, lng: f.lng }; UI.lastPos = start; src = 'desde tu ubicación actual'; }
+    else if (UI.lastPos) { start = UI.lastPos; src = 'desde tu última ubicación conocida'; }
+    else { const lastDone = fixed.map((s) => find('properties', s.property_id)).filter(Boolean).pop(); start = lastDone || DEPOT; src = lastDone ? 'desde la última parada hecha (sin GPS)' : 'sin GPS: desde el punto base'; }
+    const props = T('properties'), before = pend.map((s) => find('properties', s.property_id)).filter(Boolean);
+    const order = optimizeOrder(pend, props, start);
+    const km0 = routeKm(before, start), km1 = routeKm(order.map((id) => find('properties', find('stops', id).property_id)).filter(Boolean), start);
+    [...fixed.map((s) => s.id), ...order].forEach((id, i) => { const s = find('stops', id); if (s.order_index !== i) upsert('stops', { ...s, order_index: i }); });
+    toast(`Ruta optimizada ${src} · ≈${km1.toFixed(1)} km en línea recta${km0 - km1 > 0.2 ? ` (ahorras ≈${(km0 - km1).toFixed(1)} km)` : ''}`);
   },
   openStop: (d) => go('stop', d.id),
   startStop: async (d) => {
