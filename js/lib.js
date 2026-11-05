@@ -184,10 +184,12 @@ function routeUrl(props) {
 
 /* ---------- facturación ---------- */
 const ATH_BUSINESS_PHONE = '939-405-7458';
-const STATUS_LABEL = { PENDING: 'Pendiente', SENT: 'Enviada', PAID: 'Pagada', OVERDUE: 'Vencida' };
+const STATUS_LABEL = { PENDING: 'Pendiente', SENT: 'Enviada', PAID: 'Pagada', OVERDUE: 'Vencida', CARRIED: 'Pasada a factura nueva' };
+const PAY_METHODS = { ATH_MOVIL: 'ATH Móvil', EFECTIVO: 'Efectivo', CHEQUE: 'Cheque', TARJETA: 'Tarjeta', TRANSFER: 'Transferencia' };
 const PAYMENT_LABEL = { ATH_MOVIL: 'ATH Móvil Business', CARD: 'Tarjeta de crédito', STRIPE: 'Stripe (enlace de pago)', TRANSFER: 'Transferencia' };
 function effectiveStatus(inv, today) {
   if (inv.status === 'PAID') return 'PAID';
+  if (inv.carried_to) return 'CARRIED';
   if (inv.status === 'SENT') return inv.due_date < today ? 'OVERDUE' : 'SENT';
   return 'PENDING';
 }
@@ -211,6 +213,13 @@ const feeLabel = (c) => `${money(c.monthly_fee)} ${c.fee_type === 'PER_SERVICE' 
 /** Precio de una propiedad: el suyo si lo tiene; si no, el del cliente. */
 const propFee = (p, c) => (p && p.fee != null && p.fee !== '' && +p.fee >= 0 ? +p.fee : +c.monthly_fee || 0);
 const propFeeLabel = (p, c) => `${money(propFee(p, c))} ${c.fee_type === 'PER_SERVICE' ? 'por servicio' : '/ mes'}${p && p.fee != null && p.fee !== '' ? ' (precio propio)' : ' (precio del cliente)'}`;
+/* ---------- pagos, abonos, saldo a favor y saldo anterior ---------- */
+const invPaid = (inv, db) => r2((db.payments || []).filter((p) => p.invoice_id === inv.id).reduce((s, p) => s + p.amount, 0));
+/** Lo que falta por cobrar de una factura (0 si está pagada o si su saldo pasó a una factura nueva). */
+const invBalance = (inv, db) => (inv.status === 'PAID' || inv.carried_to ? 0 : Math.max(0, r2(inv.total_amount - invPaid(inv, db))));
+/** Saldo a favor del cliente: pagos adelantados menos lo ya aplicado en facturas. */
+const clientCredit = (db, cid) => Math.max(0, r2((db.payments || []).filter((p) => p.client_id === cid && !p.invoice_id).reduce((s, p) => s + p.amount, 0) - db.invoices.filter((i) => i.client_id === cid).reduce((s, i) => s + (+i.credit_applied || 0), 0)));
+const clientOwed = (db, cid) => r2(db.invoices.filter((i) => i.client_id === cid).reduce((s, i) => s + invBalance(i, db), 0));
 function buildInvoice(client, db, period, today) {
   const lines = []; let stopIds = [];
   if (client.fee_type === 'PER_SERVICE') {
@@ -235,12 +244,26 @@ function buildInvoice(client, db, period, today) {
   items.forEach((i) => lines.push({ description: i.item_name, amount: i.price, kind: 'PART', ref_id: i.id }));
   const orders = db.workOrders.filter((w) => w.client_id === client.id && w.status === 'DONE');
   orders.forEach((w) => lines.push({ description: `${w.type}${w.description ? ' — ' + w.description : ''}`, amount: w.price, kind: 'WORK_ORDER', ref_id: w.id }));
+  const newCount = lines.length;
+  // saldo anterior: facturas anteriores con balance pendiente se suman a esta
+  const carryIds = [];
+  db.invoices.filter((i) => i.client_id === client.id && invBalance(i, db) > 0.005).sort((a, b) => (a.created_at || '').localeCompare(b.created_at || '')).forEach((i) => {
+    carryIds.push(i.id);
+    const paid = invPaid(i, db);
+    lines.push({ description: `Saldo anterior — Factura ${invNumber(i, db)} (${i.period})${paid > 0 ? ` · total ${money(i.total_amount)}, abonado ${money(paid)}` : ''}`, amount: invBalance(i, db), kind: 'PREV', ref_id: i.id });
+  });
+  // saldo a favor (pago adelantado)
+  const gross = r2(lines.reduce((s, l) => s + l.amount, 0)), credit = Math.min(clientCredit(db, client.id), gross);
+  if (newCount && credit > 0.005) lines.push({ description: 'Pago adelantado aplicado', amount: -credit, kind: 'CREDIT' });
   const invoice = {
+    credit_applied: newCount && credit > 0.005 ? credit : 0,
     id: uid('inv'), number: `EPS-${period.replace('-', '')}-${String(db.invoices.filter((i) => i.period === period).length + 1).padStart(3, '0')}`, client_id: client.id, period, lines,
     total_amount: Math.round(lines.reduce((s, l) => s + l.amount, 0) * 100) / 100,
     payment_method: 'ATH_MOVIL', status: 'DRAFT', due_date: addDays(today, 15), created_at: new Date().toISOString(),
   };
-  return { invoice, itemIds: items.map((i) => i.id), orderIds: orders.map((o) => o.id), stopIds };
+  invoice.newCount = newCount;
+  if (invoice.total_amount <= 0.005 && newCount) invoice.status = 'PAID';
+  return { carryIds: newCount ? carryIds : [], invoice, itemIds: items.map((i) => i.id), orderIds: orders.map((o) => o.id), stopIds };
 }
 
 /* ---------- ajustes: negocio, logo y opciones del PDF ---------- */
@@ -686,7 +709,7 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
   const prop = db ? db.properties.find((p) => p.client_id === client.id) : null;
   let text = `🧾 *${cfg.biz.name}* — Factura ${o.number ? 'N° ' + num : inv.period}\nCliente: ${client.name}\nVence: ${fmtDate(inv.due_date)}\n\n`;
   text += inv.lines.map((l) => `• ${l.description}: ${money(l.amount)}`).join('\n');
-  text += `\n\n*Total: ${money(inv.total_amount)}*\n${paymentInstructions(inv.payment_method, cfg)}\n\n${o.footerText || ''}`;
+  text += `\n\n*Total: ${money(inv.total_amount)}*${db && invPaid(inv, db) > 0 && inv.status !== 'PAID' ? `\nAbonos: -${money(invPaid(inv, db))}\n*Balance pendiente: ${money(invBalance(inv, db))}*` : ''}\n${paymentInstructions(inv.payment_method, cfg)}\n\n${o.footerText || ''}`;
 
   const L = [];
   if (o.clientInfo) {
@@ -694,7 +717,7 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
     [client.phone && `Tel. ${client.phone}`, client.email, prop && `${prop.address}, ${prop.municipality}`].filter(Boolean).forEach((x) => L.push({ t: x, size: 9.5, c: GREY }));
     L.push({ space: 10 });
   }
-  const KIND = { FEE: 'Servicio mensual', VISIT: 'Servicio por visita', PART: 'Pieza', WORK_ORDER: 'Orden de trabajo' };
+  const KIND = { FEE: 'Servicio mensual', VISIT: 'Servicio por visita', PART: 'Pieza', WORK_ORDER: 'Orden de trabajo', PREV: 'Saldo anterior', CREDIT: 'Crédito' };
   const cols = o.itemType ? [0.07, 0.5, 0.25, 0.18] : [0.07, 0.75, 0, 0.18];
   const head = [{ t: '#', w: cols[0] }, { t: 'Descripción', w: cols[1] }];
   if (o.itemType) head.push({ t: 'Tipo', w: cols[2] });
@@ -711,11 +734,13 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
   if (o.subtotals && kinds.length > 1) {
     kinds.forEach((k) => {
       const sub = inv.lines.filter((l) => l.kind === k).reduce((s, l) => s + l.amount, 0);
-      L.push({ size: 10, pad: 2, row: [{ t: '', w: 0.55 }, { t: { FEE: 'Servicios', VISIT: 'Servicios', PART: 'Piezas', WORK_ORDER: 'Órdenes de trabajo' }[k], w: 0.27, align: 'right', c: GREY }, { t: money(sub), w: 0.18, align: 'right' }] });
+      L.push({ size: 10, pad: 2, row: [{ t: '', w: 0.55 }, { t: { FEE: 'Servicios', VISIT: 'Servicios', PART: 'Piezas', WORK_ORDER: 'Órdenes de trabajo', PREV: 'Saldo anterior', CREDIT: 'Crédito' }[k], w: 0.27, align: 'right', c: GREY }, { t: money(sub), w: 0.18, align: 'right' }] });
     });
     L.push({ space: 4 });
   }
   L.push({ size: 13, pad: 7, ...(th.flat ? { c: INK, line: true } : { bg: th.acc, c: [1, 1, 1] }), b: true, row: [{ t: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', w: 0.7 }, { t: money(inv.total_amount), w: 0.3, align: 'right' }] }, { space: 12 });
+  const paidSoFar = db ? invPaid(inv, db) : 0, balNow = db ? invBalance(inv, db) : inv.total_amount;
+  if (paidSoFar > 0 && inv.status !== 'PAID') L.push({ size: 10.5, pad: 3, row: [{ t: 'Abonos recibidos', w: 0.7, align: 'right', c: GREY }, { t: '-' + money(paidSoFar), w: 0.3, align: 'right' }] }, { size: 12, pad: 5, b: true, row: [{ t: 'BALANCE PENDIENTE', w: 0.7, align: 'right' }, { t: money(balNow), w: 0.3, align: 'right' }] }, { space: 8 });
   if (o.payBox) {
     const rows = [{ t: 'MÉTODO DE PAGO', size: 8.5, b: true, c: GREY }, { t: PAYMENT_LABEL[inv.payment_method] || inv.payment_method, size: 11, b: true }];
     if (inv.status === 'PAID') rows.push({ t: 'Pago recibido. ¡Gracias!', size: 10, c: LC.ok, b: true });
@@ -917,6 +942,8 @@ function backupSheets(db) {
   db.properties.forEach((p) => props.push([cname(p.client_id), p.address, p.municipality, (p.service_days || []).map((d) => DN[d]).join(', '), (p.dates || []).map((x) => x.d + (x.t ? ' ' + x.t : '')).join('; '), p.gate_code || '', p.access_notes || '', p.lat ?? '', p.lng ?? '', db.waterBodies.filter((w) => w.property_id === p.id).map((w) => `${w.name} (${w.gallons} gal)`).join('; '), p.fee != null && p.fee !== '' ? +p.fee : '']));
   const facturas = [['Número', 'Cliente', 'Período', 'Vence', 'Total', 'Estado', 'Método de pago']];
   db.invoices.forEach((i) => facturas.push([invNumber(i, db), cname(i.client_id), i.period, i.due_date, +i.total_amount || 0, STATUS_LABEL[effectiveStatus(i, todayISO())] || i.status, PAYMENT_LABEL[i.payment_method] || i.payment_method]));
+  const pagos = [['Fecha', 'Cliente', 'Monto', 'Método', 'Tipo', 'Factura', 'Nota']];
+  (db.payments || []).forEach((p) => pagos.push([p.date, cname(p.client_id), +p.amount || 0, PAY_METHODS[p.method] || p.method, p.invoice_id ? 'Pago de factura' : 'Pago adelantado', (() => { const i = db.invoices.find((x) => x.id === p.invoice_id); return i ? invNumber(i, db) : ''; })(), p.note || '']));
   const lecturas = [['Fecha', 'Cliente', 'Cuerpo de agua', 'Cloro libre', 'pH', 'Alcalinidad', 'Ác. cianúrico', 'Sal', 'Dureza de calcio']];
   db.readings.forEach((r) => {
     const w = db.waterBodies.find((x) => x.id === r.water_body_id) || {}, p = db.properties.find((x) => x.id === w.property_id) || {};
@@ -924,7 +951,7 @@ function backupSheets(db) {
   });
   const cot = [['Número', 'Cliente / prospecto', 'Teléfono', 'Fecha', 'Vigencia', 'Total', 'Estado']];
   db.quotes.forEach((q) => { const w = quoteWho(q, db); cot.push([q.number, w.name + (q.client_id ? '' : ' (prospecto)'), w.phone, (q.created_at || '').slice(0, 10), q.valid_until, quoteTotals(q).total, QUOTE_LABEL[quoteStatus(q)]]); });
-  return [{ name: 'Clientes', rows: clientes }, { name: 'Propiedades', rows: props }, { name: 'Cotizaciones', rows: cot }, { name: 'Facturas', rows: facturas }, { name: 'Lecturas químicas', rows: lecturas }];
+  return [{ name: 'Clientes', rows: clientes }, { name: 'Propiedades', rows: props }, { name: 'Cotizaciones', rows: cot }, { name: 'Facturas', rows: facturas }, { name: 'Pagos', rows: pagos }, { name: 'Lecturas químicas', rows: lecturas }];
 }
 
 /* ---------- ubicación y fotos con sello ---------- */
@@ -994,4 +1021,4 @@ async function processPhoto(file, kind, coords) {
   return { uri: cv.toDataURL('image/jpeg', 0.72), w, h };
 }
 
-if (typeof module !== 'undefined') module.exports = { routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
+if (typeof module !== 'undefined') module.exports = { PAY_METHODS, invPaid, invBalance, clientCredit, clientOwed, routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };

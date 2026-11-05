@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v24 · Foto horizontal';
+const APP_VERSION = 'v25 · Pagos adelantados y saldo anterior';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -55,6 +55,7 @@ function removeClient(id) {
   db.workOrders = db.workOrders.filter((w) => w.client_id !== id);
   db.shoppingItems = db.shoppingItems.filter((i) => i.client_id !== id);
   db.invoices = db.invoices.filter((i) => i.client_id !== id);
+  db.payments = (db.payments || []).filter((p) => p.client_id !== id);
   db.quotes = db.quotes.filter((q) => q.client_id !== id);
   db.dispatchLog = db.dispatchLog.filter((l) => l.client_id !== id);
   db.photos = db.photos.filter((p) => !stops.includes(p.owner_id) && !wos.includes(p.owner_id));
@@ -393,6 +394,7 @@ function clientView(id) {
   const c = find('clients', id);
   if (!c) return { title: '—', body: empty('Cliente no encontrado.') };
   let h = `<div class="card"><div>📞 ${esc(c.phone || '—')}</div><div>✉️ ${esc(c.email || '—')}</div><div>💵 ${feeLabel(c)}</div><div class="mt-s">${seg(c.fee_type || 'MONTHLY', [['MONTHLY', 'Cobro mensual'], ['PER_SERVICE', 'Por servicio']], 'setPref', { id: c.id, f: 'fee_type' })}</div>${c.notes ? muted(esc(c.notes), 'mt-s') : ''}${c.tags.length ? muted('Etiquetas: ' + esc(c.tags.join(', ')), 'mt-s') : ''}</div>
+    ${payCard(c)}
     <h2>Informe al cliente</h2><div class="card"><div class="chk"><span class="t">Mostrar hora de llegada y salida en el informe</span><label class="sw"><input type="checkbox" data-cflag="hide_times" data-id="${c.id}"${c.hide_times ? '' : ' checked'}><i></i></label></div>${muted('Las horas siempre quedan guardadas en tu registro; esto solo decide si salen en el PDF y el texto que le envías a este cliente.')}</div>
     <h2>Preferencias de envío guardadas</h2><div class="card">${muted('Canal predeterminado')}${seg(c.dispatch_channel_pref, CHANNELS, 'setPref', { id: c.id, f: 'dispatch_channel_pref' })}
     <div class="mt">${muted('Formato predeterminado')}</div>${seg(c.dispatch_format_pref, FORMATS, 'setPref', { id: c.id, f: 'dispatch_format_pref' })}
@@ -565,39 +567,81 @@ function itemSheet(id) {
 /* =====================================================================
    6. FACTURACIÓN
    ===================================================================== */
-const INV_COLOR = { PENDING: COL.pending, SENT: COL.water, PAID: COL.ok, OVERDUE: COL.bad };
+const INV_COLOR = { PENDING: COL.pending, SENT: COL.water, PAID: COL.ok, OVERDUE: COL.bad, CARRIED: '#a78bfa' };
 const invView = (i) => effectiveStatus(i, todayISO());
 
+
+/* ---------- pagos / saldo a favor ---------- */
+const payMethodSel = (id) => `<select id="${id}">${Object.entries(PAY_METHODS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select>`;
+function payRows(inv) {
+  const paid = invPaid(inv, S.db); if (!(paid > 0) && !inv.carried_to) return '';
+  if (inv.carried_to) { const n = find('invoices', inv.carried_to); return `<div class="muted mt-s">↪ El saldo pasó a la factura ${esc(n ? invNumber(n, S.db) : '')}</div>`; }
+  if (inv.status === 'PAID') return '';
+  return `<div class="row between" style="padding-top:6px"><span class="muted">Abonos recibidos</span><b style="color:${COL.ok}">-${money(paid)}</b></div><div class="row between"><b>Balance pendiente</b><span class="amount" style="color:${COL.bad}">${money(invBalance(inv, S.db))}</span></div>`;
+}
+function payList(list) {
+  return list.slice().sort((a, b) => (b.date + b.created_at).localeCompare(a.date + a.created_at)).map((p) => `<div class="row between" style="padding:5px 0"><span>${fmtDate(p.date)} · ${esc(PAY_METHODS[p.method] || p.method)}${p.note ? ' · ' + esc(p.note) : ''}</span><span><b>${money(p.amount)}</b> <button class="x" data-act="delPayment" data-id="${p.id}" aria-label="Quitar pago">✕</button></span></div>`).join('');
+}
+function payHistory(inv) {
+  const l = T('payments').filter((p) => p.invoice_id === inv.id); if (!l.length) return '';
+  return `<h2>Pagos de esta factura</h2><div class="card">${payList(l)}</div>`;
+}
+function payCard(c) {
+  const credit = clientCredit(S.db, c.id), owed = clientOwed(S.db, c.id), l = T('payments').filter((p) => p.client_id === c.id);
+  return `<div class="row between"><h2>Pagos y saldo</h2>${btn('+ Pago adelantado', 'payAdvance', { id: c.id }, 'sm ghost')}</div>
+    <div class="card"><div class="row"><div class="grow">${muted('Saldo a favor')}<div class="big" style="color:${COL.ok}">${money(credit)}</div></div><div class="grow">${muted('Por cobrar')}<div class="big" style="color:${owed > 0 ? COL.bad : COL.ok}">${money(owed)}</div></div></div>
+    ${credit > 0 ? muted('El saldo a favor se descuenta solo en la próxima factura.', 'mt-s') : ''}${l.length ? `<div class="mt-s">${payList(l.slice(0, 6))}</div>${l.length > 6 ? muted('… y ' + (l.length - 6) + ' pagos más (Excel → hoja Pagos)') : ''}` : muted('Sin pagos registrados.', 'mt-s')}</div>`;
+}
+/** Registra un pago. Si es de factura y se pasa del balance, el sobrante queda como saldo a favor. */
+function addPayment({ client_id, amount, date, method, note, invoice_id }) {
+  amount = Math.round(+amount * 100) / 100; if (!(amount > 0)) return false;
+  const mk = (amt, inv) => upsert('payments', { id: uid('pay'), client_id, amount: amt, date: date || todayISO(), method: method || 'ATH_MOVIL', note: note || '', invoice_id: inv || null, created_at: new Date().toISOString() });
+  if (invoice_id) {
+    const inv = find('invoices', invoice_id), bal = invBalance(inv, S.db), now = Math.min(amount, bal), extra = Math.round((amount - now) * 100) / 100;
+    if (now > 0) mk(now, invoice_id);
+    if (extra > 0) mk(extra, null);
+    const cur = find('invoices', invoice_id);
+    if (invBalance({ ...cur, status: 'X' }, S.db) <= 0.005) upsert('invoices', { ...cur, status: 'PAID' });
+    return { extra };
+  }
+  mk(amount, null); return { extra: 0 };
+}
+function paySheet(title, hint, defAmt, act, data) {
+  openSheet(title, `${hint ? muted(hint) : ''}<div class="fld mt-s"><label>Monto ($)</label><input id="pay_amt" inputmode="decimal" value="${defAmt ? defAmt : ''}" placeholder="0.00"></div><div class="fld"><label>Fecha</label><input type="date" id="pay_date" value="${todayISO()}"></div><div class="fld"><label>Método</label>${payMethodSel('pay_method')}</div><div class="fld"><label>Nota (opcional)</label><input id="pay_note" placeholder="Ej. 3 meses por adelantado"></div>${btn('Guardar pago', act, data)}`);
+}
 function invoicesTab() {
   if (UI.invMode === 'quotes') return quotesTab();
   const period = todayISO().slice(0, 7);
   const list = T('invoices').filter((i) => UI.invFilter === 'ALL' || invView(i) === UI.invFilter).sort((a, b) => b.created_at.localeCompare(a.created_at));
-  const owed = T('invoices').filter((i) => i.status !== 'PAID').reduce((s, i) => s + i.total_amount, 0), paid = T('invoices').filter((i) => i.status === 'PAID').reduce((s, i) => s + i.total_amount, 0);
+  const owed = T('invoices').reduce((s, i) => s + invBalance(i, S.db), 0), paid = T('invoices').reduce((s, i) => s + (i.status === 'PAID' ? i.total_amount : invPaid(i, S.db)), 0);
   let h = `<div class="row mb"><div class="card grow" style="margin:0">${muted('Por cobrar')}<div class="big" style="color:${COL.bad}">${money(owed)}</div></div><div class="card grow" style="margin:0">${muted('Cobrado')}<div class="big" style="color:${COL.ok}">${money(paid)}</div></div></div>
     ${btn('⚡ Procesar facturación del mes (1 toque)', 'bulkInvoices', {}, 'dark')}<div class="mt"></div>
     <div class="chips">${chip('Todas', UI.invFilter === 'ALL', 'setInvFilter', { v: 'ALL' })}${Object.keys(STATUS_LABEL).map((s) => chip(STATUS_LABEL[s], UI.invFilter === s, 'setInvFilter', { v: s }, INV_COLOR[s])).join('')}</div>`;
-  h += list.length ? '<div class="cols">' + list.map((i) => `<div class="card bar tap" style="border-left-color:${INV_COLOR[invView(i)]}" data-act="openInvoice" data-id="${i.id}"><div class="row between"><b>${esc(clientName(i.client_id))}</b>${badge(STATUS_LABEL[invView(i)], INV_COLOR[invView(i)])}</div>${muted(`${i.period} · vence ${fmtDate(i.due_date)}`, 'mt-s')}<div class="amount">${money(i.total_amount)}</div></div>`).join('') + '</div>' : empty('No hay facturas en esta vista.');
+  h += list.length ? '<div class="cols">' + list.map((i) => `<div class="card bar tap" style="border-left-color:${INV_COLOR[invView(i)]}" data-act="openInvoice" data-id="${i.id}"><div class="row between"><b>${esc(clientName(i.client_id))}</b>${badge(STATUS_LABEL[invView(i)], INV_COLOR[invView(i)])}</div>${muted(`${i.period} · vence ${fmtDate(i.due_date)}`, 'mt-s')}<div class="amount">${money(i.total_amount)}</div>${invPaid(i, S.db) > 0 && i.status !== 'PAID' && !i.carried_to ? muted('Abonado ' + money(invPaid(i, S.db)) + ' · balance ' + money(invBalance(i, S.db))) : ''}</div>`).join('') + '</div>' : empty('No hay facturas en esta vista.');
   return { title: 'Facturación', sub: `Periodo ${period}`, right: btn('+ Factura', 'newInvoice', {}, 'sm'), body: invModeSeg() + '<div class="mt"></div>' + h + `<div class="mt"></div>${btn('🎨 Cambiar plantilla de factura y cotización', 'openTemplates', {}, 'sm ghost')}` };
 }
 function invoiceView(id) {
   const inv = find('invoices', id), c = inv && find('clients', inv.client_id);
   if (!inv || !c) return { title: '—', body: empty('Factura no encontrada.') };
   const h = `<div class="card"><b>${esc(c.name)}</b>${muted('Vence ' + fmtDate(inv.due_date))}<div class="mt-s">${badge(STATUS_LABEL[invView(inv)], INV_COLOR[invView(inv)])}</div></div>
-    <h2>Desglose</h2><div class="card">${inv.lines.map((l) => `<div class="row between" style="padding:6px 0"><span>${l.kind === 'FEE' || l.kind === 'VISIT' ? '🗓' : l.kind === 'PART' ? '🔧' : '📋'} ${esc(l.description)}</span><b>${money(l.amount)}</b></div>`).join('')}
-    <div class="row between" style="border-top:1px solid var(--border);margin-top:6px;padding-top:8px"><b style="font-size:18px">Total</b><span class="amount">${money(inv.total_amount)}</span></div></div>
+    <h2>Desglose</h2><div class="card">${inv.lines.map((l) => `<div class="row between" style="padding:6px 0"><span>${l.kind === 'FEE' || l.kind === 'VISIT' ? '🗓' : l.kind === 'PART' ? '🔧' : l.kind === 'PREV' ? '↩️' : l.kind === 'CREDIT' ? '💚' : '📋'} ${esc(l.description)}</span><b>${money(l.amount)}</b></div>`).join('')}
+    <div class="row between" style="border-top:1px solid var(--border);margin-top:6px;padding-top:8px"><b style="font-size:18px">Total</b><span class="amount">${money(inv.total_amount)}</span></div>${payRows(inv)}</div>
+    ${payHistory(inv)}
     <h2>Método de pago</h2>${seg(inv.payment_method, [['ATH_MOVIL', 'ATH Móvil'], ['CARD', 'Tarjeta'], ['STRIPE', 'Stripe'], ['TRANSFER', 'Transf.']], 'setPayment', { id: inv.id })}
     <div class="card mt" style="background:#f0f9ff;border-color:${COL.water}">${inv.payment_method === 'ATH_MOVIL' ? `${muted('ATH Móvil Business')}${athUrl(S.settings) ? `<div class="mt-s"><a href="${esc(athUrl(S.settings))}" target="_blank" rel="noopener" style="word-break:break-all">${esc(athUrl(S.settings))}</a></div>` : ''}${S.settings.pay.athPhone ? `<div class="big" style="color:${COL.water}">${esc(S.settings.pay.athPhone)}</div>` : ''}${!athUrl(S.settings) && !S.settings.pay.athPhone ? muted('Aún no hay enlace ni número. Configúralo abajo.') : ''}` : ''}<div class="mt-s">${esc(paymentInstructions(inv.payment_method, S.settings))}</div></div>
     <div class="mt"></div>${btn('🎨 Personalizar factura y logo', 'openPdfSettings', {}, 'ghost')}
     ${inv.status === 'DRAFT' ? btn('Eliminar borrador', 'delDraft', { id: inv.id }, 'sm danger') : ''}`;
-  const footer = btn('📤 Enviar factura (preferencia del cliente)', 'sendInvoice', { id: inv.id }) + (inv.status !== 'PAID' ? btn('✓ Marcar como pagada', 'markPaid', { id: inv.id }, 'ok') : '');
+  const footer = btn('📤 Enviar factura (preferencia del cliente)', 'sendInvoice', { id: inv.id }) + (inv.status !== 'PAID' && !inv.carried_to ? btn('💵 Registrar pago / abono', 'payInvoice', { id: inv.id }, 'ok') + btn('✓ Marcar como pagada (todo)', 'markPaid', { id: inv.id }, 'ghost') : '');
   return { title: `Factura ${invNumber(inv, S.db)}`, body: h, footer };
 }
 function createInvoiceFor(c) {
   const period = todayISO().slice(0, 7);
   if (T('invoices').some((i) => i.client_id === c.id && i.period === period)) return false;
-  const { invoice, itemIds, orderIds, stopIds } = buildInvoice(c, S.db, period, todayISO());
-  if (!invoice.lines.length) return false;
+  const { invoice, itemIds, orderIds, stopIds, carryIds } = buildInvoice(c, S.db, period, todayISO());
+  if (!invoice.newCount) return false;
+  delete invoice.newCount;
   upsert('invoices', invoice);
+  carryIds.forEach((id) => upsert('invoices', { ...find('invoices', id), carried_to: invoice.id }));
   itemIds.forEach((id) => upsert('shoppingItems', { ...find('shoppingItems', id), status: 'INVOICED' }));
   orderIds.forEach((id) => upsert('workOrders', { ...find('workOrders', id), status: 'INVOICED' }));
   stopIds.forEach((id) => upsert('stops', { ...find('stops', id), invoice_id: invoice.id }));
@@ -1257,7 +1301,26 @@ const A = {
   newInvoice: () => openSheet('Factura individual', `${muted('Elige el cliente (periodo ' + todayISO().slice(0, 7) + ')')}<div class="chips mt-s">${activeClients().map((c) => chip(c.name, false, 'invFor', { id: c.id })).join('')}</div>`),
   invFor: (d) => { closeSheet(); if (!createInvoiceFor(find('clients', d.id))) alert('Ese cliente ya tiene factura de este periodo o no tiene nada que facturar.'); },
   setPayment: (d) => upsert('invoices', { ...find('invoices', d.id), payment_method: d.v }),
-  markPaid: (d) => upsert('invoices', { ...find('invoices', d.id), status: 'PAID' }),
+  markPaid: (d) => {
+    const inv = find('invoices', d.id), bal = invBalance(inv, S.db);
+    if (bal > 0) addPayment({ client_id: inv.client_id, amount: bal, method: PAY_METHODS[inv.payment_method] ? inv.payment_method : 'ATH_MOVIL', invoice_id: inv.id });
+    else upsert('invoices', { ...inv, status: 'PAID' });
+  },
+  payInvoice: (d) => { const inv = find('invoices', d.id); paySheet('Registrar pago / abono', `Factura ${invNumber(inv, S.db)} · balance ${money(invBalance(inv, S.db))}. Si pagan menos, queda el balance; si pagan más, el sobrante queda como saldo a favor.`, invBalance(inv, S.db), 'savePay', { id: inv.id }); },
+  payAdvance: (d) => paySheet('Pago adelantado', `Cliente: ${find('clients', d.id).name}. Se descontará solo en sus próximas facturas.`, '', 'savePay', { c: d.id }),
+  savePay: (d) => {
+    const g = (i) => ($('#' + i) || {}).value || '', amount = parseFloat(g('pay_amt').replace(',', '.'));
+    if (!(amount > 0)) return toast('Escribe el monto');
+    const inv = d.id ? find('invoices', d.id) : null, cid = inv ? inv.client_id : d.c;
+    const r = addPayment({ client_id: cid, amount, date: g('pay_date'), method: g('pay_method'), note: g('pay_note'), invoice_id: inv ? inv.id : null });
+    closeSheet(); toast(r && r.extra > 0 ? `Pago guardado · ${money(r.extra)} quedó como saldo a favor` : 'Pago guardado'); render();
+  },
+  delPayment: (d) => {
+    const p = find('payments', d.id); if (!p || !confirm('¿Quitar este pago?')) return;
+    remove('payments', p.id);
+    const inv = p.invoice_id && find('invoices', p.invoice_id);
+    if (inv && inv.status === 'PAID' && invBalance({ ...inv, status: 'X' }, S.db) > 0.005) upsert('invoices', { ...inv, status: 'SENT' });
+  },
   sendInvoice: (d) => {
     const inv = find('invoices', d.id), c = find('clients', inv.client_id);
     openDispatch(c.id, 'INVOICE', buildInvoiceDoc(c, inv, S.settings, S.db), { after: () => { const cur = find('invoices', inv.id); if (cur && cur.status === 'DRAFT') upsert('invoices', { ...cur, status: 'SENT' }); } });
@@ -1269,6 +1332,7 @@ const A = {
       if (l.kind === 'PART' && find('shoppingItems', l.ref_id)) upsert('shoppingItems', { ...find('shoppingItems', l.ref_id), status: 'INSTALLED' });
       if (l.kind === 'WORK_ORDER' && find('workOrders', l.ref_id)) upsert('workOrders', { ...find('workOrders', l.ref_id), status: 'DONE' });
     });
+    inv.lines.filter((l) => l.kind === 'PREV' && find('invoices', l.ref_id)).forEach((l) => upsert('invoices', { ...find('invoices', l.ref_id), carried_to: null }));
     T('stops').filter((s) => s.invoice_id === inv.id).forEach((s) => upsert('stops', { ...s, invoice_id: null }));
     remove('invoices', inv.id); UI.view = null; render();
   },
