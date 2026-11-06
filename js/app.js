@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v26 · ATH Móvil personal';
+const APP_VERSION = 'v27 · Condiciones de pago y distribuciones';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -623,7 +623,7 @@ function invoicesTab() {
 function invoiceView(id) {
   const inv = find('invoices', id), c = inv && find('clients', inv.client_id);
   if (!inv || !c) return { title: '—', body: empty('Factura no encontrada.') };
-  const h = `<div class="card"><b>${esc(c.name)}</b>${muted('Vence ' + fmtDate(inv.due_date))}<div class="mt-s">${badge(STATUS_LABEL[invView(inv)], INV_COLOR[invView(inv)])}</div></div>
+  const h = `<div class="card"><b>${esc(c.name)}</b>${muted('Vence ' + fmtDate(inv.due_date) + (termsLabel(inv.terms) ? ' · ' + termsLabel(inv.terms) : ''))}${inv.status !== 'PAID' && !inv.carried_to ? `<div class="fld mt-s"><label>Condiciones de pago</label><select data-invterms="${inv.id}"><option value="">${inv.terms ? '' : 'Escoge…'}</option>${optList(TERMS, inv.terms)}</select></div>` : ''}<div class="mt-s">${badge(STATUS_LABEL[invView(inv)], INV_COLOR[invView(inv)])}</div></div>
     <h2>Desglose</h2><div class="card">${inv.lines.map((l) => `<div class="row between" style="padding:6px 0"><span>${l.kind === 'FEE' || l.kind === 'VISIT' ? '🗓' : l.kind === 'PART' ? '🔧' : l.kind === 'PREV' ? '↩️' : l.kind === 'CREDIT' ? '💚' : '📋'} ${esc(l.description)}</span><b>${money(l.amount)}</b></div>`).join('')}
     <div class="row between" style="border-top:1px solid var(--border);margin-top:6px;padding-top:8px"><b style="font-size:18px">Total</b><span class="amount">${money(inv.total_amount)}</span></div>${payRows(inv)}</div>
     ${payHistory(inv)}
@@ -640,6 +640,8 @@ function createInvoiceFor(c) {
   const { invoice, itemIds, orderIds, stopIds, carryIds } = buildInvoice(c, S.db, period, todayISO());
   if (!invoice.newCount) return false;
   delete invoice.newCount;
+  invoice.terms = c.terms || S.settings.invoice.terms || 'NET15';
+  invoice.due_date = dueFor(invoice.terms, invoice.issue_date);
   upsert('invoices', invoice);
   carryIds.forEach((id) => upsert('invoices', { ...find('invoices', id), carried_to: invoice.id }));
   itemIds.forEach((id) => upsert('shoppingItems', { ...find('shoppingItems', id), status: 'INVOICED' }));
@@ -767,6 +769,8 @@ function pdfView() {
     <h2>🎯 Valores meta predeterminados</h2><div class="card"><div class="g2">${PARAMS.map((p) => fld(p.label, `<input data-setv="targets.${p.key}" inputmode="decimal" value="${esc(st.targets[p.key])}">`)).join('')}</div></div>
     <h2 id="tpl_sec">🎨 Plantilla de factura y cotización</h2><div class="card"><div class="tplgrid">${DOC_TEMPLATES.map(([k, n, d]) => `<button class="tplc${st.invoice.template === k ? ' on' : ''}" data-act="setTemplate" data-v="${k}" style="--c:${esc(st.invoice.accent || '#0284c7')}">${tplMini(k)}<b>${n}</b><span>${d}</span></button>`).join('')}</div>
     ${muted('Color de acento (la Minimalista no usa color)', 'mt')}<div class="chips mt-s">${ACCENTS.map((c) => `<button class="swatch${(st.invoice.accent || '#0284c7') === c ? ' on' : ''}" data-act="setAccent" data-v="${c}" style="background:${c}" aria-label="${c}"></button>`).join('')}</div>${muted('Usa «👁 Factura» abajo para ver cómo queda.', 'mt-s')}</div>
+    <h2>📐 Distribución de la factura</h2><div class="card"><div class="tplgrid">${[['standard', 'Estándar', 'Datos del cliente arriba, tabla y total en barra.'], ['twocol', 'Dos columnas', 'Cliente y detalles lado a lado, totales a la derecha, pago y condiciones juntos.'], ['compact', 'Compacta', 'Más pequeña y apretada: cabe en una sola hoja aunque tenga muchas líneas.']].map(([k, n, d]) => `<button class="tplc${(st.invoice.layout || 'standard') === k ? ' on' : ''}" data-act="setLayout" data-v="${k}" style="--c:${esc(st.invoice.accent || '#0284c7')}">${layMini(k)}<b>${n}</b><span>${d}</span></button>`).join('')}</div>
+    <div class="fld mt"><label>Condiciones de pago por defecto (se pueden cambiar en cada factura)</label><select data-setv="invoice.terms">${optList(TERMS, st.invoice.terms || 'NET15')}</select></div>${muted('«Vence a la entrega» = vence el mismo día que se emite. «Fin de mes» = último día del mes de emisión. Se muestra en la factura y en el mensaje.', 'mt-s')}</div>
     <h2>📝 Cotizaciones</h2><div class="card">${fld('Días de vigencia por defecto', `<input data-setv="quote.validDays" inputmode="numeric" value="${esc(st.quote.validDays)}">`)}${fld('Condiciones (salen al final del PDF)', `<textarea data-setv="quote.terms" style="min-height:70px">${esc(st.quote.terms)}</textarea>`)}${fld('Texto del pie', `<input data-setv="quote.footerText" value="${esc(st.quote.footerText)}">`)}<div class="chk"><span class="t">Línea de firma «Aceptada por»</span><label class="sw"><input type="checkbox" data-set="quote.accept"${st.quote.accept ? ' checked' : ''}><i></i></label></div></div>
     <h2>🧾 Factura — qué incluir</h2><div class="card">${tgl('invoice', INV_OPTS)}
     ${fld('Términos', `<textarea data-setv="invoice.termsText" style="min-height:70px">${esc(st.invoice.termsText)}</textarea>`)}${fld('Texto del pie', `<input data-setv="invoice.footerText" value="${esc(st.invoice.footerText)}">`)}</div>
@@ -841,6 +845,12 @@ function renderCat() {
     ${S.settings.catalog.map((x, i) => `<div class="card" style="padding:10px"><div class="fld" style="margin-bottom:8px"><label>Servicio</label><input data-cat="${i}:name" value="${esc(x.name)}" placeholder="Ej. Limpieza profunda de piscina"></div><div class="g2"><div class="fld" style="margin:0"><label>Precio ($)</label><input data-cat="${i}:price" inputmode="decimal" value="${x.price || ''}"></div><div style="display:flex;align-items:flex-end"><button class="btn sm ghost" data-act="catDel" data-i="${i}" style="width:100%">Quitar</button></div></div></div>`).join('') || empty('El catálogo está vacío.')}
     ${btn('+ Añadir servicio', 'catAdd', {}, 'ghost')}<div class="mt-s"></div>${btn('Listo', 'closeSheet')}`;
 }
+const layMini = (k) => {
+  const g = '<i style="display:block;height:4px;border-radius:2px;background:#e2e8f0;margin:3px 0"></i>', ac = 'var(--c)', bar = `<i style="display:block;height:6px;background:${ac};margin:4px 0"></i>`;
+  if (k === 'twocol') return `<div class="tm"><div style="display:flex;gap:4px"><i style="flex:1;height:16px;background:#eef2f7;border-radius:2px"></i><i style="flex:1;height:16px;background:#eef2f7;border-radius:2px"></i></div>${bar}${g}${g}<i style="display:block;height:7px;width:50%;margin-left:50%;background:${ac};margin-top:4px"></i></div>`;
+  if (k === 'compact') return `<div class="tm"><i style="display:block;height:3px;width:50%;background:#94a3b8;border-radius:2px"></i>${bar}${g.replace('4px', '2px')}${g.replace('4px', '2px')}${g.replace('4px', '2px')}${g.replace('4px', '2px')}<i style="display:block;height:5px;width:45%;margin-left:55%;background:${ac}"></i></div>`;
+  return `<div class="tm"><i style="display:block;height:5px;width:45%;background:#334155;border-radius:2px"></i>${g}${bar}${g}${g}<i style="display:block;height:7px;background:${ac};margin:4px 0"></i></div>`;
+};
 const tplMini = (k) => {
   const g = '<i style="display:block;height:4px;border-radius:2px;background:#e2e8f0;margin:3px 0"></i>', ac = 'var(--c)';
   if (k === 'modern') return `<div class="tm"><div style="background:${ac};height:20px;margin:-6px -6px 6px"></div>${g}${g}<i style="display:block;height:7px;background:${ac};margin:4px 0"></i>${g}</div>`;
@@ -1007,6 +1017,7 @@ const A = {
   noop() {},
   setInvMode: (d) => { UI.invMode = d.v; render(); },
   setQFilter: (d) => { UI.qFilter = d.v; render(); },
+  setLayout: (d) => { S.settings.invoice.layout = d.v; persist(); render(); },
   setTemplate: (d) => { S.settings.invoice.template = d.v; persist(); render(); },
   setAccent: (d) => { S.settings.invoice.accent = d.v; persist(); render(); },
   newQuote: () => openQuoteForm(), editQuote: (d) => openQuoteForm(d.id), openQuote: (d) => go('quote', d.id),
@@ -1386,6 +1397,7 @@ function onInput(e) {
   else if (t.dataset.cat) { const [i, k] = t.dataset.cat.split(':'); const it = S.settings.catalog[+i]; if (it) { it[k] = k === 'price' ? toNum(t.value) || 0 : t.value; persist(); } }
   else if (t.id === 'cl_q') { UI.q = t.value; scheduleRender(); }
   else if (t.id === 'chem_gal') { UI.chem.gal = t.value; const sg = document.querySelector('[id^="sg_chem_"]'); if (sg) { const wb = find('waterBodies', UI.chem.wbId) || T('waterBodies').find((w) => T('properties').some((p) => p.id === w.property_id && p.client_id === UI.chem.clientId)); const gal = toNum(t.value) || (wb && wb.gallons) || 0; sg.dataset.gal = gal; sg.innerHTML = sugHtml(sg.id.slice(3), gal, draftOf(sg.id.slice(3), null), null, sg.dataset.wbp); } }
+  else if (t.dataset.invterms) { const inv = find('invoices', t.dataset.invterms); if (inv && t.value) { upsert('invoices', { ...inv, terms: t.value, due_date: dueFor(t.value, inv.issue_date || (inv.created_at || '').slice(0, 10) || todayISO()) }); toast('Condiciones: ' + termsLabel(t.value)); } }
   else if (t.dataset.setvChem) { S.settings.chem[t.dataset.setvChem] = t.value; persist(); }
   else if (t.dataset.setv) { setPath(S.settings, t.dataset.setv, t.value); persist(); }
   else if (t.dataset.note) { const row = find('stops', t.dataset.note); if (row) { row.client_note = t.value; persist(); } }

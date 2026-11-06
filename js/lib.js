@@ -214,6 +214,15 @@ const feeLabel = (c) => `${money(c.monthly_fee)} ${c.fee_type === 'PER_SERVICE' 
 /** Precio de una propiedad: el suyo si lo tiene; si no, el del cliente. */
 const propFee = (p, c) => (p && p.fee != null && p.fee !== '' && +p.fee >= 0 ? +p.fee : +c.monthly_fee || 0);
 const propFeeLabel = (p, c) => `${money(propFee(p, c))} ${c.fee_type === 'PER_SERVICE' ? 'por servicio' : '/ mes'}${p && p.fee != null && p.fee !== '' ? ' (precio propio)' : ' (precio del cliente)'}`;
+/* ---------- condiciones de pago ---------- */
+const TERMS = [['DUE_RECEIPT', 'Vence a la entrega'], ['NET7', 'Neto 7 días'], ['NET10', 'Neto 10 días'], ['NET15', 'Neto 15 días'], ['NET30', 'Neto 30 días'], ['NET45', 'Neto 45 días'], ['NET60', 'Neto 60 días'], ['EOM', 'Fin de mes']];
+const termsLabel = (c) => (TERMS.find((t) => t[0] === c) || [])[1] || '';
+function dueFor(code, issue) {
+  if (code === 'DUE_RECEIPT') return issue;
+  if (code === 'EOM') { const [y, m] = issue.split('-').map(Number); return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10); }
+  const n = +((/NET(\d+)/.exec(code) || [])[1]) || 15;
+  return addDays(issue, n);
+}
 /* ---------- pagos, abonos, saldo a favor y saldo anterior ---------- */
 const invPaid = (inv, db) => r2((db.payments || []).filter((p) => p.invoice_id === inv.id).reduce((s, p) => s + p.amount, 0));
 /** Lo que falta por cobrar de una factura (0 si está pagada o si su saldo pasó a una factura nueva). */
@@ -260,7 +269,7 @@ function buildInvoice(client, db, period, today) {
     credit_applied: newCount && credit > 0.005 ? credit : 0,
     id: uid('inv'), number: `EPS-${period.replace('-', '')}-${String(db.invoices.filter((i) => i.period === period).length + 1).padStart(3, '0')}`, client_id: client.id, period, lines,
     total_amount: Math.round(lines.reduce((s, l) => s + l.amount, 0) * 100) / 100,
-    payment_method: 'ATH_MOVIL', status: 'DRAFT', due_date: addDays(today, 15), created_at: new Date().toISOString(),
+    payment_method: 'ATH_MOVIL', status: 'DRAFT', due_date: addDays(today, 15), issue_date: today, terms: 'NET15', created_at: new Date().toISOString(),
   };
   invoice.newCount = newCount;
   if (invoice.total_amount <= 0.005 && newCount) invoice.status = 'PAID';
@@ -275,8 +284,8 @@ const DEFAULT_SETTINGS = {
   invoice: {
     logo: true, showName: true, bizInfo: true, number: true, dates: true, clientInfo: true, itemType: true, subtotals: true,
     payBox: true, instructions: true, terms: true, stamp: true, footer: true,
-    template: 'classic', accent: '#0284c7',
-    termsText: 'Pago dentro de 15 días a partir de la fecha de emisión. Gracias por su preferencia.',
+    template: 'classic', accent: '#0284c7', layout: 'standard', terms: 'NET15',
+    termsText: 'Gracias por su preferencia.',
     footerText: 'Gracias por confiar en Elite Pool Service PR',
   },
   quote: { validDays: 15, accept: true, terms: 'Cotización sujeta a cambios si las condiciones de la piscina o los equipos son diferentes a lo inspeccionado.', footerText: 'Gracias por su interés en Elite Pool Service PR' },
@@ -294,6 +303,7 @@ function mergeSettings(saved) {
   if (saved && typeof saved === 'object') {
     if (saved && Array.isArray(saved.catalog)) out.catalog = saved.catalog.filter((x) => x && x.name).map((x) => ({ name: String(x.name), price: +x.price || 0 }));
     for (const k of ['biz', 'pay', 'invoice', 'quote', 'report']) if (saved[k] && typeof saved[k] === 'object') Object.assign(out[k], saved[k]);
+    if (out.invoice.termsText === 'Pago dentro de 15 días a partir de la fecha de emisión. Gracias por su preferencia.') out.invoice.termsText = 'Gracias por su preferencia.';
     if (saved.logo && saved.logo.data) out.logo = saved.logo;
     if (saved.chem && typeof saved.chem === 'object') out.chem = chemPrefs(saved.chem);
     if (saved.targets && typeof saved.targets === 'object') Object.keys(DEFAULT_TARGETS).forEach((k) => { const n = parseFloat(saved.targets[k]); if (!isNaN(n)) out.targets[k] = n; });
@@ -479,6 +489,36 @@ function buildPdf(title, lines, opts = {}) {
         yy -= b.size * 1.35;
       }));
       y -= h + 6; continue;
+    }
+    if (it.cols2) {
+      const gap = 10, pw = (CW - gap) / 2, pad = 9;
+      const mk = (side) => side.map((r) => { const size = r.size || 9.5; return { r, size, ls: wrapLines(r.t, size, r.b, pw - 2 * pad) }; });
+      const bl = [mk(it.cols2[0]), mk(it.cols2[1])];
+      const h = Math.max(...bl.map((b) => b.reduce((s, x) => s + x.ls.length * x.size * 1.35, 0))) + 2 * pad - 2;
+      need(h);
+      bl.forEach((b, i) => {
+        const x0 = M + i * (pw + gap); rect(x0, y - h, pw, h, it.bg || [0.97, 0.98, 0.99], it.border || [0.88, 0.9, 0.93]);
+        let yy = y - pad;
+        b.forEach((x) => x.ls.forEach((ln) => {
+          text(ln, x0 + pad, yy - x.size * 0.9, x.size, x.r.b, x.r.c || INK);
+          if (x.r.link) { const bw = tw(ln, x.size, x.r.b), px = x0 + pad; annots.push(`<< /Type /Annot /Subtype /Link /Rect [${px.toFixed(1)} ${(yy - x.size * 1.2).toFixed(1)} ${(px + bw).toFixed(1)} ${(yy + 1).toFixed(1)}] /Border [0 0 0] /A << /S /URI /URI (${pdfEsc(x.r.link)}) >> >>`); hline(yy - x.size * 1.1, x.r.c || INK, px, px + bw); }
+          yy -= x.size * 1.35;
+        }));
+      });
+      y -= h + 8; continue;
+    }
+    if (it.totals) {
+      const bw = (it.w || 0.5) * CW, x0 = M + CW - bw;
+      it.totals.forEach((r) => {
+        const size = r.size || 10, pad = r.pad ?? 4, h = size * 1.3 + 2 * pad;
+        need(h);
+        if (r.bg) rect(x0, y - h, bw, h, r.bg);
+        text(r.l, x0 + 8, y - pad - size * 0.9, size, r.b, r.c || (r.bg ? [1, 1, 1] : GREY));
+        const vs = r.v, vw = tw(vs, size, r.b); text(vs, x0 + bw - 8 - vw, y - pad - size * 0.9, size, r.b, r.c || (r.bg ? [1, 1, 1] : INK));
+        if (r.line) hline(y - h, LINE, x0, x0 + bw);
+        y -= h;
+      });
+      y -= 8; continue;
     }
     if (it.imgRow) {
       const n = it.imgRow.length, gap = 12, w = (CW - gap * (n - 1)) / n, maxH = 200;
@@ -708,40 +748,58 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
   const cfg = cfgIn || mergeSettings(null), o = cfg.invoice, th = docTheme(cfg);
   const today = todayISO(), st = effectiveStatus(inv, today), num = invNumber(inv, db);
   const prop = db ? db.properties.find((p) => p.client_id === client.id) : null;
-  let text = `🧾 *${cfg.biz.name}* — Factura ${o.number ? 'N° ' + num : inv.period}\nCliente: ${client.name}\nVence: ${fmtDate(inv.due_date)}\n\n`;
+  let text = `🧾 *${cfg.biz.name}* — Factura ${o.number ? 'N° ' + num : inv.period}\nCliente: ${client.name}\nVence: ${fmtDate(inv.due_date)}${termsLabel(inv.terms) ? ' (' + termsLabel(inv.terms) + ')' : ''}\n\n`;
   text += inv.lines.map((l) => `• ${l.description}: ${money(l.amount)}`).join('\n');
   text += `\n\n*Total: ${money(inv.total_amount)}*${db && invPaid(inv, db) > 0 && inv.status !== 'PAID' ? `\nAbonos: -${money(invPaid(inv, db))}\n*Balance pendiente: ${money(invBalance(inv, db))}*` : ''}\n${paymentInstructions(inv.payment_method, cfg)}\n\n${o.footerText || ''}`;
 
+  const lay = ['standard', 'twocol', 'compact'].includes(o.layout) ? o.layout : 'standard', two = lay === 'twocol', cmp = lay === 'compact';
   const L = [];
-  if (o.clientInfo) {
-    L.push({ t: 'FACTURAR A', size: 8.5, b: true, c: GREY }, { t: client.name, size: 12, b: true });
-    [client.phone && `Tel. ${client.phone}`, client.email, prop && `${prop.address}, ${prop.municipality}`].filter(Boolean).forEach((x) => L.push({ t: x, size: 9.5, c: GREY }));
-    L.push({ space: 10 });
-  }
+  const cinfo = [client.phone && `Tel. ${client.phone}`, client.email, prop && `${prop.address}, ${prop.municipality}`].filter(Boolean);
+  const tl = termsLabel(inv.terms), issueTxt = fmtDate(inv.issue_date || inv.created_at);
+  const detRows = [{ t: 'DETALLES DE LA FACTURA', size: 8.5, b: true, c: GREY }];
+  if (o.number) detRows.push({ t: `N° ${num}`, size: 12, b: true });
+  if (o.dates) detRows.push({ t: `Emisión: ${issueTxt}`, size: 9.5 }, { t: `Vence: ${fmtDate(inv.due_date)}`, size: 9.5, b: true });
+  if (o.dates && tl) detRows.push({ t: `Condiciones: ${tl}`, size: 9.5 });
+  detRows.push({ t: `Periodo: ${inv.period}`, size: 9.5, c: GREY }, { t: `Estado: ${STATUS_LABEL[st]}`, size: 9.5, c: GREY });
+  const cliRows = [{ t: 'FACTURAR A', size: 8.5, b: true, c: GREY }, { t: client.name, size: 12, b: true }, ...cinfo.map((x) => ({ t: x, size: 9.5, c: GREY }))];
+  if (two) L.push({ cols2: [o.clientInfo ? cliRows : [{ t: ' ', size: 9.5 }], detRows], bg: th.soft, border: th.edge });
+  else if (o.clientInfo && cmp) L.push({ t: `Cliente: ${client.name}${cinfo.length ? '  ·  ' + cinfo.join('  ·  ') : ''}`, size: 9.5, b: false }, { space: 6 });
+  else if (o.clientInfo) { cliRows.forEach((r) => L.push(r)); L.push({ space: 10 }); }
   const KIND = { FEE: 'Servicio mensual', VISIT: 'Servicio por visita', PART: 'Pieza', WORK_ORDER: 'Orden de trabajo', PREV: 'Saldo anterior', CREDIT: 'Crédito' };
   const cols = o.itemType ? [0.07, 0.5, 0.25, 0.18] : [0.07, 0.75, 0, 0.18];
   const head = [{ t: '#', w: cols[0] }, { t: 'Descripción', w: cols[1] }];
   if (o.itemType) head.push({ t: 'Tipo', w: cols[2] });
   head.push({ t: 'Monto', w: cols[3], align: 'right' });
-  L.push(th.flat ? { size: 9, pad: 5, b: true, c: INK, line: true, row: head } : { size: 9, pad: 5, bg: th.acc, b: true, c: [1, 1, 1], row: head });
+  const fs = cmp ? 9 : 10, fp = cmp ? 3 : 6;
+  L.push(th.flat ? { size: 9, pad: cmp ? 3 : 5, b: true, c: INK, line: true, row: head } : { size: 9, pad: cmp ? 3 : 5, bg: th.acc, b: true, c: [1, 1, 1], row: head });
   inv.lines.forEach((l, i) => {
     const r = [{ t: String(i + 1), w: cols[0], c: GREY }, { t: l.description, w: cols[1] }];
     if (o.itemType) r.push({ t: KIND[l.kind] || l.kind, w: cols[2], c: GREY });
     r.push({ t: money(l.amount), w: cols[3], align: 'right', b: true });
-    L.push({ size: 10, pad: 6, line: true, bg: i % 2 ? [0.975, 0.98, 0.99] : null, row: r });
+    L.push({ size: fs, pad: fp, line: true, bg: i % 2 && !cmp ? [0.975, 0.98, 0.99] : null, row: r });
   });
   L.push({ space: 8 });
   const kinds = [...new Set(inv.lines.map((l) => l.kind))];
-  if (o.subtotals && kinds.length > 1) {
-    kinds.forEach((k) => {
-      const sub = inv.lines.filter((l) => l.kind === k).reduce((s, l) => s + l.amount, 0);
-      L.push({ size: 10, pad: 2, row: [{ t: '', w: 0.55 }, { t: { FEE: 'Servicios', VISIT: 'Servicios', PART: 'Piezas', WORK_ORDER: 'Órdenes de trabajo', PREV: 'Saldo anterior', CREDIT: 'Crédito' }[k], w: 0.27, align: 'right', c: GREY }, { t: money(sub), w: 0.18, align: 'right' }] });
-    });
-    L.push({ space: 4 });
+  const KSUB = { FEE: 'Servicios', VISIT: 'Servicios', PART: 'Piezas', WORK_ORDER: 'Órdenes de trabajo', PREV: 'Saldo anterior', CREDIT: 'Crédito' };
+  const paidSoFar = db ? invPaid(inv, db) : 0, balNow = db ? invBalance(inv, db) : inv.total_amount, showBal = paidSoFar > 0 && inv.status !== 'PAID';
+  if (two || cmp) {
+    const T = [];
+    if (o.subtotals && kinds.length > 1) kinds.forEach((k) => T.push({ l: KSUB[k], v: money(inv.lines.filter((x) => x.kind === k).reduce((s, x) => s + x.amount, 0)), size: 9.5, pad: 2 }));
+    T.push(th.flat ? { l: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', v: money(inv.total_amount), size: 13, pad: 6, b: true, c: INK, line: true } : { l: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', v: money(inv.total_amount), size: 13, pad: 6, b: true, bg: th.acc });
+    if (showBal) T.push({ l: 'Abonos recibidos', v: '-' + money(paidSoFar), size: 10, pad: 3 }, { l: 'BALANCE PENDIENTE', v: money(balNow), size: 12, pad: 4, b: true, c: INK });
+    L.push({ totals: T, w: 0.5 }, { space: 6 });
+  } else {
+    if (o.subtotals && kinds.length > 1) {
+      kinds.forEach((k) => {
+        const sub = inv.lines.filter((l) => l.kind === k).reduce((s, l) => s + l.amount, 0);
+        L.push({ size: 10, pad: 2, row: [{ t: '', w: 0.55 }, { t: KSUB[k], w: 0.27, align: 'right', c: GREY }, { t: money(sub), w: 0.18, align: 'right', b: true }] });
+      });
+      L.push({ space: 4 });
+    }
+    L.push({ size: 13, pad: 7, ...(th.flat ? { c: INK, line: true } : { bg: th.acc, c: [1, 1, 1] }), b: true, row: [{ t: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', w: 0.7 }, { t: money(inv.total_amount), w: 0.3, align: 'right' }] }, { space: 12 });
+    if (showBal) L.push({ size: 10.5, pad: 3, row: [{ t: 'Abonos recibidos', w: 0.7, align: 'right', c: GREY }, { t: '-' + money(paidSoFar), w: 0.3, align: 'right' }] }, { size: 12, pad: 5, b: true, row: [{ t: 'BALANCE PENDIENTE', w: 0.7, align: 'right' }, { t: money(balNow), w: 0.3, align: 'right' }] }, { space: 8 });
   }
-  L.push({ size: 13, pad: 7, ...(th.flat ? { c: INK, line: true } : { bg: th.acc, c: [1, 1, 1] }), b: true, row: [{ t: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', w: 0.7 }, { t: money(inv.total_amount), w: 0.3, align: 'right' }] }, { space: 12 });
-  const paidSoFar = db ? invPaid(inv, db) : 0, balNow = db ? invBalance(inv, db) : inv.total_amount;
-  if (paidSoFar > 0 && inv.status !== 'PAID') L.push({ size: 10.5, pad: 3, row: [{ t: 'Abonos recibidos', w: 0.7, align: 'right', c: GREY }, { t: '-' + money(paidSoFar), w: 0.3, align: 'right' }] }, { size: 12, pad: 5, b: true, row: [{ t: 'BALANCE PENDIENTE', w: 0.7, align: 'right' }, { t: money(balNow), w: 0.3, align: 'right' }] }, { space: 8 });
+  const termsBlock = o.terms && o.termsText && o.termsText.trim() ? o.termsText.trim() : '';
   if (o.payBox) {
     const rows = [{ t: 'MÉTODO DE PAGO', size: 8.5, b: true, c: GREY }, { t: PAYMENT_LABEL[inv.payment_method] || inv.payment_method, size: 11, b: true }];
     if (inv.status === 'PAID') rows.push({ t: 'Pago recibido. ¡Gracias!', size: 10, c: LC.ok, b: true });
@@ -754,14 +812,25 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
       if (inv.payment_method === 'ATH_PERSONAL' && (cfg.pay.athPersonalPhone || '').trim()) rows.push({ t: `ATH Móvil personal: ${cfg.pay.athPersonalPhone.trim()}`, size: 15, b: true, c: th.acc });
       if (o.instructions && !(inv.payment_method === 'ATH_MOVIL')) rows.push({ t: paymentInstructions(inv.payment_method, cfg), size: 9.5, c: GREY });
     }
-    L.push({ panel: { rows, bg: th.soft, border: th.edge } });
-  } else if (o.instructions && inv.status !== 'PAID') L.push({ t: paymentInstructions(inv.payment_method, cfg), size: 10 });
-  if (o.terms && o.termsText && o.termsText.trim()) L.push({ space: 4 }, { t: 'TÉRMINOS', size: 8.5, b: true, c: GREY }, { t: o.termsText.trim(), size: 9, c: GREY });
+    const right = [{ t: 'CONDICIONES', size: 8.5, b: true, c: GREY }];
+    if (tl) right.push({ t: tl, size: 11, b: true }, { t: `Vence: ${fmtDate(inv.due_date)}`, size: 9.5, c: GREY });
+    if (termsBlock) right.push({ t: termsBlock, size: 9, c: GREY });
+    if (two && right.length > 1) L.push({ cols2: [rows, right], bg: th.soft, border: th.edge });
+    else {
+      L.push({ panel: { rows, bg: th.soft, border: th.edge } });
+      if (termsBlock) L.push({ space: 4 }, { t: 'TÉRMINOS', size: 8.5, b: true, c: GREY }, { t: termsBlock, size: 9, c: GREY });
+    }
+  } else {
+    if (o.instructions && inv.status !== 'PAID') L.push({ t: paymentInstructions(inv.payment_method, cfg), size: 10 });
+    if (termsBlock) L.push({ space: 4 }, { t: 'TÉRMINOS', size: 8.5, b: true, c: GREY }, { t: termsBlock, size: 9, c: GREY });
+  }
 
   const meta = [];
-  if (o.number) meta.push(['N°', num]);
-  if (o.dates) meta.push(['Emisión', fmtDate(inv.created_at)], ['Vence', fmtDate(inv.due_date)]);
-  meta.push(['Estado', STATUS_LABEL[st]], ['Periodo', inv.period]);
+  if (!two) {
+    if (o.number) meta.push(['N°', num]);
+    if (o.dates) { meta.push(['Emisión', issueTxt], ['Vence', fmtDate(inv.due_date)]); if (tl) meta.push(['Condiciones', tl]); }
+    meta.push(['Estado', STATUS_LABEL[st]], ['Periodo', inv.period]);
+  }
   const stamp = o.stamp && (st === 'PAID' ? { text: 'PAGADA', color: LC.ok } : st === 'OVERDUE' ? { text: 'VENCIDA', color: LC.bad } : null);
   return {
     title: `Factura ${inv.period} — ${cfg.biz.name}`, text, lines: L,
@@ -1023,4 +1092,4 @@ async function processPhoto(file, kind, coords) {
   return { uri: cv.toDataURL('image/jpeg', 0.72), w, h };
 }
 
-if (typeof module !== 'undefined') module.exports = { PAY_METHODS, invPaid, invBalance, clientCredit, clientOwed, routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
+if (typeof module !== 'undefined') module.exports = { TERMS, termsLabel, dueFor, PAY_METHODS, invPaid, invBalance, clientCredit, clientOwed, routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
