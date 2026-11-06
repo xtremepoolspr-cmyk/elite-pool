@@ -444,7 +444,8 @@ function buildPdf(title, lines, opts = {}) {
     let leftBottom = y, x0 = M;
     if (hd.logo) { const d = logoDims(150, 62); drawImg(hd.logo, M, y, d.lw, d.lh); x0 = M + d.lw + 12; leftBottom = y - d.lh; }
     let ly = y - 13;
-    const labW = hd.label ? tw(hd.label, 20, true) + 18 : 0, leftMax = Math.max(120, CW - labW - (x0 - M));
+    // el texto de la izquierda no puede invadir la columna derecha (etiqueta + datos de la factura, que son más anchos)
+    const rightW = Math.max(hd.label ? tw(hd.label, 20, true) : 0, ...(hd.meta || []).map(([k, v]) => tw(`${k}  ${v}`, 9, false))) + 24, leftMax = Math.max(100, CW - rightW - (x0 - M));
     (hd.name ? wrapLines(hd.name, 15, true, leftMax) : []).forEach((ln) => { text(ln, x0, ly, 15, true, INK); ly -= 17; });
     (hd.lines || []).forEach((l) => wrapLines(l, 8.5, false, leftMax).forEach((ln) => { text(ln, x0, ly, 8.5, false, GREY); ly -= 11; }));
     leftBottom = Math.min(leftBottom, ly + 6);
