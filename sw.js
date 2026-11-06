@@ -1,6 +1,6 @@
 // Service worker: guarda la app para que abra sin internet.
 // Sube CACHE a v2, v3… cuando publiques cambios para que los teléfonos se actualicen.
-const CACHE = 'elite-pool-v29';
+const CACHE = 'elite-pool-v30';
 const TILES = 'epspr-tiles-v1'; // mosaicos del mapa vistos antes (se ven sin internet)
 const SHELL = [
   './', './index.html', './styles.css', './manifest.webmanifest',
