@@ -185,8 +185,8 @@ function routeUrl(props) {
 /* ---------- facturación ---------- */
 const ATH_BUSINESS_PHONE = '939-405-7458';
 const STATUS_LABEL = { PENDING: 'Pendiente', SENT: 'Enviada', PAID: 'Pagada', OVERDUE: 'Vencida', CARRIED: 'Pasada a factura nueva' };
-const PAY_METHODS = { ATH_MOVIL: 'ATH Móvil', EFECTIVO: 'Efectivo', CHEQUE: 'Cheque', TARJETA: 'Tarjeta', TRANSFER: 'Transferencia' };
-const PAYMENT_LABEL = { ATH_MOVIL: 'ATH Móvil Business', CARD: 'Tarjeta de crédito', STRIPE: 'Stripe (enlace de pago)', TRANSFER: 'Transferencia' };
+const PAY_METHODS = { ATH_MOVIL: 'ATH Móvil Business', ATH_PERSONAL: 'ATH Móvil personal', EFECTIVO: 'Efectivo', CHEQUE: 'Cheque', TARJETA: 'Tarjeta', TRANSFER: 'Transferencia' };
+const PAYMENT_LABEL = { ATH_MOVIL: 'ATH Móvil Business', ATH_PERSONAL: 'ATH Móvil (personal)', CARD: 'Tarjeta de crédito', STRIPE: 'Stripe (enlace de pago)', TRANSFER: 'Transferencia' };
 function effectiveStatus(inv, today) {
   if (inv.status === 'PAID') return 'PAID';
   if (inv.carried_to) return 'CARRIED';
@@ -204,6 +204,7 @@ function paymentInstructions(m, cfg) {
     if (link) return `Pague por ATH Móvil Business con este enlace: ${link}${ph ? ` (o al ${ph})` : ''}`;
     return ph ? `Pague por ATH Móvil Business al ${ph} (${nm}).` : 'Coordine su pago por ATH Móvil Business con nosotros.';
   }
+  if (m === 'ATH_PERSONAL') { const ph = cfg && cfg.pay ? (cfg.pay.athPersonalPhone || '').trim() : ''; return ph ? `Envíe su pago por ATH Móvil (personal) al ${ph}.` : 'Coordine su pago por ATH Móvil con nosotros.'; }
   if (m === 'CARD' || m === 'STRIPE') return 'Le enviaremos un enlace seguro de pago con tarjeta.';
   return 'Coordine su transferencia con nosotros; le daremos los datos bancarios.';
 }
@@ -270,7 +271,7 @@ function buildInvoice(client, db, period, today) {
 const DEFAULT_SETTINGS = {
   biz: { name: 'Elite Pool Service PR', tagline: '', address: '', phone: '', email: '', regId: '', tech: '', team: 'Técnico 1, Técnico 2' },
   logo: null,
-  pay: { athLink: '', athPhone: ATH_BUSINESS_PHONE },
+  pay: { athLink: '', athPhone: ATH_BUSINESS_PHONE, athPersonalPhone: '' },
   invoice: {
     logo: true, showName: true, bizInfo: true, number: true, dates: true, clientInfo: true, itemType: true, subtotals: true,
     payBox: true, instructions: true, terms: true, stamp: true, footer: true,
@@ -750,6 +751,7 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
         if (link) rows.push({ t: 'Pagar con ATH Móvil Business (toque el enlace):', size: 10, b: true }, { t: link, size: 10.5, b: true, c: th.acc, link });
         if (ph) rows.push({ t: `ATH Móvil Business: ${ph}`, size: link ? 10 : 15, b: true, c: link ? INK : th.acc });
       }
+      if (inv.payment_method === 'ATH_PERSONAL' && (cfg.pay.athPersonalPhone || '').trim()) rows.push({ t: `ATH Móvil personal: ${cfg.pay.athPersonalPhone.trim()}`, size: 15, b: true, c: th.acc });
       if (o.instructions && !(inv.payment_method === 'ATH_MOVIL')) rows.push({ t: paymentInstructions(inv.payment_method, cfg), size: 9.5, c: GREY });
     }
     L.push({ panel: { rows, bg: th.soft, border: th.edge } });
