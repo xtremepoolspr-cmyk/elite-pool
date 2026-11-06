@@ -415,7 +415,22 @@ function buildPdf(title, lines, opts = {}) {
   const lsz = th.t === 'elegant' ? 15 : 20;
   const bigLogo = !hd.name && hd.logo; // el logo ya trae el nombre: se muestra más grande
   const logoDims = (mw, mh) => { if (bigLogo) { mw *= 1.5; mh *= 1.4; } const sc = Math.min(mw / hd.logo.w, mh / hd.logo.h); return { lw: hd.logo.w * sc, lh: hd.logo.h * sc }; };
-  if (th.t === 'modern') {
+  if (opts.hdrStyle === 'split') {
+    // estilo recibo: logo grande a la izquierda con los datos de la compañía DEBAJO; a la derecha título, datos del documento y «Facturar a»
+    const rw = CW * 0.46, rx = W - M - rw, leftMax = rx - M - 14;
+    let ly = y;
+    if (hd.logo) { const d = logoDims(190, 84); drawImg(hd.logo, M, ly, d.lw, d.lh); ly -= d.lh + 8; }
+    if (hd.name) wrapLines(hd.name, 12, true, leftMax).forEach((ln) => { text(ln, M, ly - 10, 12, true, INK); ly -= 15; });
+    (hd.lines || []).forEach((t) => wrapLines(t, 9, false, leftMax).forEach((ln) => { text(ln, M, ly - 8, 9, false, GREY); ly -= 12; }));
+    let ry = y;
+    if (hd.label) { text(hd.label, W - M - tw(hd.label, 20, true), ry - 18, 20, true, AC); ry -= 32; }
+    (hd.meta || []).forEach(([k, v]) => { const vs = String(v); text(k, rx, ry - 9, 9.5, true, INK); text(vs, W - M - tw(vs, 9.5, false), ry - 9, 9.5, false, INK); ry -= 14; });
+    if ((hd.billTo || []).length) {
+      ry -= 8; text('Facturar a', rx, ry - 9, 9.5, true, INK);
+      hd.billTo.forEach((s, i) => wrapLines(s, 9.5, i === 0, rw - 80).forEach((ln) => { text(ln, W - M - tw(ln, 9.5, i === 0), ry - 9, 9.5, i === 0, INK); ry -= 13; }));
+    }
+    y = Math.min(ly, ry) - 6; rect(M, y, CW, th.t === 'minimal' ? 1 : 2, AC); y -= 16;
+  } else if (th.t === 'modern') {
     let x0 = M, lh = 0;
     if (hd.logo) { const d = logoDims(120, 56); lh = d.lh; x0 = M + d.lw + 20; }
     let LS = lsz, labW = hd.label ? tw(hd.label, LS, true) + 18 : 0;
@@ -504,6 +519,30 @@ function buildPdf(title, lines, opts = {}) {
         yy -= b.size * 1.35;
       }));
       y -= h + 6; continue;
+    }
+    if (it.split) {
+      const lw = CW * 0.46, rw = CW * 0.5, rx = M + CW - rw, pad = 8, sp = it.split, LF = sp.left || {}, TT = sp.right || [];
+      const rowsL = (LF.rows || []).map((r) => { const size = r.size || 10; return { r, size, ls: wrapLines(r.t, size, r.b, lw - 2 * pad) }; });
+      const hL = (LF.title ? 26 : 0) + rowsL.reduce((s, b) => s + b.ls.length * b.size * 1.4, 0) + 4;
+      const hR = TT.reduce((s, r) => s + (r.size || 10) * 1.3 + 2 * (r.pad ?? 4), 0);
+      const h = Math.max(hL, hR); need(h);
+      let yy = y;
+      if (LF.title) { rect(M, yy - 22, lw, 22, AC); text(LF.title, M + pad, yy - 15, 10.5, true, [1, 1, 1]); yy -= 26; }
+      rowsL.forEach((b) => b.ls.forEach((ln) => {
+        text(ln, M + pad, yy - b.size * 0.95, b.size, b.r.b, b.r.c || INK);
+        if (b.r.link) { const bw = tw(ln, b.size, b.r.b), px = M + pad; annots.push(`<< /Type /Annot /Subtype /Link /Rect [${px.toFixed(1)} ${(yy - b.size * 1.2).toFixed(1)} ${(px + bw).toFixed(1)} ${(yy + 1).toFixed(1)}] /Border [0 0 0] /A << /S /URI /URI (${pdfEsc(b.r.link)}) >> >>`); hline(yy - b.size * 1.1, b.r.c || INK, px, px + bw); }
+        yy -= b.size * 1.4;
+      }));
+      let ty = y;
+      TT.forEach((r) => {
+        const size = r.size || 10, p = r.pad ?? 4, rh = size * 1.3 + 2 * p;
+        if (r.bg) rect(rx, ty - rh, rw, rh, r.bg);
+        text(r.l, rx + 8, ty - p - size * 0.9, size, r.b, r.c || (r.bg ? [1, 1, 1] : GREY));
+        text(r.v, rx + rw - 8 - tw(r.v, size, r.b), ty - p - size * 0.9, size, r.b, r.c || (r.bg ? [1, 1, 1] : INK));
+        if (r.line) hline(ty - rh, LINE, rx, rx + rw);
+        ty -= rh;
+      });
+      y -= h + 8; continue;
     }
     if (it.cols2) {
       const gap = 10, pw = (CW - gap) / 2, pad = 9;
@@ -767,7 +806,7 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
   text += inv.lines.map((l) => `• ${l.description}: ${money(l.amount)}`).join('\n');
   text += `\n\n*Total: ${money(inv.total_amount)}*${db && invPaid(inv, db) > 0 && inv.status !== 'PAID' ? `\nAbonos: -${money(invPaid(inv, db))}\n*Balance pendiente: ${money(invBalance(inv, db))}*` : ''}\n${paymentInstructions(inv.payment_method, cfg)}\n\n${o.footerText || ''}`;
 
-  const lay = ['standard', 'twocol', 'compact'].includes(o.layout) ? o.layout : 'standard', two = lay === 'twocol', cmp = lay === 'compact';
+  const lay = ['standard', 'twocol', 'compact', 'recibo'].includes(o.layout) ? o.layout : 'standard', two = lay === 'twocol', cmp = lay === 'compact', rec = lay === 'recibo';
   const L = [];
   const cinfo = [client.phone && `Tel. ${client.phone}`, client.email, prop && `${prop.address}, ${prop.municipality}`].filter(Boolean);
   const tl = termsLabel(inv.terms), issueTxt = fmtDate(inv.issue_date || inv.created_at);
@@ -778,6 +817,7 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
   detRows.push({ t: `Periodo: ${inv.period}`, size: 9.5, c: GREY }, { t: `Estado: ${STATUS_LABEL[st]}`, size: 9.5, c: GREY });
   const cliRows = [{ t: 'FACTURAR A', size: 8.5, b: true, c: GREY }, { t: client.name, size: 12, b: true }, ...cinfo.map((x) => ({ t: x, size: 9.5, c: GREY }))];
   if (two) L.push({ cols2: [o.clientInfo ? cliRows : [{ t: ' ', size: 9.5 }], detRows], bg: th.soft, border: th.edge });
+  else if (rec) { /* «Facturar a» va en el encabezado */ }
   else if (o.clientInfo && cmp) L.push({ t: `Cliente: ${client.name}${cinfo.length ? '  ·  ' + cinfo.join('  ·  ') : ''}`, size: 9.5, b: false }, { space: 6 });
   else if (o.clientInfo) { cliRows.forEach((r) => L.push(r)); L.push({ space: 10 }); }
   const KIND = { FEE: 'Servicio mensual', VISIT: 'Servicio por visita', PART: 'Pieza', WORK_ORDER: 'Orden de trabajo', PREV: 'Saldo anterior', CREDIT: 'Crédito' };
@@ -797,7 +837,15 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
   const kinds = [...new Set(inv.lines.map((l) => l.kind))];
   const KSUB = { FEE: 'Servicios', VISIT: 'Servicios', PART: 'Piezas', WORK_ORDER: 'Órdenes de trabajo', PREV: 'Saldo anterior', CREDIT: 'Crédito' };
   const paidSoFar = db ? invPaid(inv, db) : 0, balNow = db ? invBalance(inv, db) : inv.total_amount, showBal = paidSoFar > 0 && inv.status !== 'PAID';
-  if (two || cmp) {
+  let recT = null;
+  if (rec) {
+    recT = [];
+    if (o.subtotals && kinds.length > 1) kinds.forEach((k) => recT.push({ l: KSUB[k], v: money(inv.lines.filter((x) => x.kind === k).reduce((s, x) => s + x.amount, 0)), size: 9.5, pad: 3 }));
+    recT.push({ l: 'Total', v: money(inv.total_amount), size: 11, pad: 5, b: true, c: INK, line: true });
+    const pd = inv.status === 'PAID' ? inv.total_amount : paidSoFar;
+    if (pd > 0) recT.push({ l: inv.status === 'PAID' ? 'Pagada' : 'Abonado', v: '-' + money(pd), size: 10, pad: 4 });
+    recT.push({ l: 'SALDO PENDIENTE', v: money(balNow), size: 12, pad: 7, b: true, ...(th.flat ? { c: INK, line: true } : { bg: th.acc }) });
+  } else if (two || cmp) {
     const T = [];
     if (o.subtotals && kinds.length > 1) kinds.forEach((k) => T.push({ l: KSUB[k], v: money(inv.lines.filter((x) => x.kind === k).reduce((s, x) => s + x.amount, 0)), size: 9.5, pad: 2 }));
     T.push(th.flat ? { l: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', v: money(inv.total_amount), size: 13, pad: 6, b: true, c: INK, line: true } : { l: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', v: money(inv.total_amount), size: 13, pad: 6, b: true, bg: th.acc });
@@ -814,6 +862,25 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
     L.push({ size: 13, pad: 7, ...(th.flat ? { c: INK, line: true } : { bg: th.acc, c: [1, 1, 1] }), b: true, row: [{ t: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', w: 0.7 }, { t: money(inv.total_amount), w: 0.3, align: 'right' }] }, { space: 12 });
     if (showBal) L.push({ size: 10.5, pad: 3, row: [{ t: 'Abonos recibidos', w: 0.7, align: 'right', c: GREY }, { t: '-' + money(paidSoFar), w: 0.3, align: 'right' }] }, { size: 12, pad: 5, b: true, row: [{ t: 'BALANCE PENDIENTE', w: 0.7, align: 'right' }, { t: money(balNow), w: 0.3, align: 'right' }] }, { space: 8 });
   }
+  if (rec) {
+    const rr = [];
+    if (o.payBox) {
+      rr.push({ t: PAYMENT_LABEL[inv.payment_method] || inv.payment_method, size: 11, b: true });
+      if (inv.status === 'PAID') rr.push({ t: 'Pago recibido. ¡Gracias!', size: 10, c: LC.ok, b: true });
+      else {
+        if (inv.payment_method === 'ATH_MOVIL') {
+          const link = athUrl(cfg), ph = (cfg.pay.athPhone || '').trim();
+          if (link) rr.push({ t: 'Pagar con ATH Móvil Business (toque el enlace):', size: 10, b: true }, { t: link, size: 10.5, b: true, c: th.acc, link });
+          if (ph) rr.push({ t: `ATH Móvil Business: ${ph}`, size: link ? 10 : 12, b: true, c: link ? INK : th.acc });
+        }
+        if (inv.payment_method === 'ATH_PERSONAL' && (cfg.pay.athPersonalPhone || '').trim()) rr.push({ t: `ATH Móvil personal: ${cfg.pay.athPersonalPhone.trim()}`, size: 12, b: true, c: th.acc });
+        if (o.instructions && inv.payment_method !== 'ATH_MOVIL') rr.push({ t: paymentInstructions(inv.payment_method, cfg), size: 9.5, c: GREY });
+      }
+    }
+    if (tl) rr.push({ t: `Condiciones: ${tl}`, size: 9.5, c: GREY });
+    if (o.terms && o.termsText && o.termsText.trim()) rr.push({ t: o.termsText.trim(), size: 9, c: GREY });
+    L.push({ split: { left: { title: o.payBox ? 'INFORMACIÓN DE PAGO' : '', rows: rr }, right: recT } });
+  } else {
   const termsBlock = o.terms && o.termsText && o.termsText.trim() ? o.termsText.trim() : '';
   if (o.payBox) {
     const rows = [{ t: 'MÉTODO DE PAGO', size: 8.5, b: true, c: GREY }, { t: PAYMENT_LABEL[inv.payment_method] || inv.payment_method, size: 11, b: true }];
@@ -839,9 +906,14 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
     if (o.instructions && inv.status !== 'PAID') L.push({ t: paymentInstructions(inv.payment_method, cfg), size: 10 });
     if (termsBlock) L.push({ space: 4 }, { t: 'TÉRMINOS', size: 8.5, b: true, c: GREY }, { t: termsBlock, size: 9, c: GREY });
   }
+  }
 
   const meta = [];
-  if (!two) {
+  if (rec) {
+    if (o.number) meta.push(['Factura No.', num]);
+    if (o.dates) { meta.push(['Fecha', issueTxt], ['Vence', fmtDate(inv.due_date)]); if (tl) meta.push(['Condiciones', tl]); }
+    meta.push(['Estado', STATUS_LABEL[st]], ['Periodo', inv.period]);
+  } else if (!two) {
     if (o.number) meta.push(['N°', num]);
     if (o.dates) { meta.push(['Emisión', issueTxt], ['Vence', fmtDate(inv.due_date)]); if (tl) meta.push(['Condiciones', tl]); }
     meta.push(['Estado', STATUS_LABEL[st]], ['Periodo', inv.period]);
@@ -850,7 +922,7 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
   return {
     title: `Factura ${inv.period} — ${cfg.biz.name}`, text, lines: L,
     fileName: `factura-${inv.period}-${client.name.replace(/\W+/g, '-')}.pdf`,
-    opts: { header: pdfHeader(cfg, 'invoice', 'FACTURA', meta), footer: o.footer ? o.footerText : '', stamp, theme: th },
+    opts: { header: (() => { const h = pdfHeader(cfg, 'invoice', 'FACTURA', meta); if (rec && o.clientInfo) h.billTo = [client.name, ...cinfo]; return h; })(), hdrStyle: rec ? 'split' : undefined, footer: o.footer ? o.footerText : '', stamp, theme: th },
   };
 }
 
