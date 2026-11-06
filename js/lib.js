@@ -418,7 +418,9 @@ function buildPdf(title, lines, opts = {}) {
   if (th.t === 'modern') {
     let x0 = M, lh = 0;
     if (hd.logo) { const d = logoDims(120, 56); lh = d.lh; x0 = M + d.lw + 20; }
-    const labW = hd.label ? tw(hd.label, lsz, true) + 18 : 0, leftMax = Math.max(120, W - M - labW - x0);
+    let LS = lsz, labW = hd.label ? tw(hd.label, LS, true) + 18 : 0;
+    if (hd.label && W - M - labW - x0 < 150) { LS = 14; labW = tw(hd.label, LS, true) + 18; } // título largo + logo grande: se achica el título
+    const leftMax = Math.max(120, W - M - labW - x0);
     const nl = hd.name ? wrapLines(hd.name, 16, true, leftMax) : [], bl = [];
     (hd.lines || []).forEach((l) => wrapLines(l, 8.5, false, leftMax).forEach((ln) => bl.push(ln)));
     const bandH = Math.max(86, 22 + nl.length * 19 + bl.length * 11 + 14, lh + 28);
@@ -426,7 +428,7 @@ function buildPdf(title, lines, opts = {}) {
     if (hd.logo) { const d = logoDims(120, 56); rect(M - 5, H - bandH / 2 - d.lh / 2 - 5, d.lw + 10, d.lh + 10, WHITE); drawImg(hd.logo, M, H - bandH / 2 + d.lh / 2, d.lw, d.lh); }
     let ly = H - 30; nl.forEach((ln) => { text(ln, x0, ly, 16, true, WHITE); ly -= 19; });
     bl.forEach((ln) => { text(ln, x0, ly + 3, 8.5, false, [0.9, 0.96, 1]); ly -= 11; });
-    if (hd.label) text(hd.label, W - M - tw(hd.label, lsz, true), H - 38, lsz, true, WHITE);
+    if (hd.label) text(hd.label, W - M - tw(hd.label, LS, true), H - 38, LS, true, WHITE);
     let ry = H - bandH - 18;
     (hd.meta || []).forEach(([k, v]) => { const s = `${k}  ${v}`; text(s, W - M - tw(s, 9, false), ry, 9, false, INK); ry -= 12; });
     y = Math.min(ry, H - bandH - 12) - 6;
@@ -442,10 +444,14 @@ function buildPdf(title, lines, opts = {}) {
     y -= 4; hline(y, LINE); y -= 16;
   } else {
     let leftBottom = y, x0 = M;
-    if (hd.logo) { const d = logoDims(150, 62); drawImg(hd.logo, M, y, d.lw, d.lh); x0 = M + d.lw + 12; leftBottom = y - d.lh; }
-    let ly = y - 13;
-    // el texto de la izquierda no puede invadir la columna derecha (etiqueta + datos de la factura, que son más anchos)
-    const rightW = Math.max(hd.label ? tw(hd.label, 20, true) : 0, ...(hd.meta || []).map(([k, v]) => tw(`${k}  ${v}`, 9, false))) + 24, leftMax = Math.max(100, CW - rightW - (x0 - M));
+    const rightW = Math.max(hd.label ? tw(hd.label, 20, true) : 0, ...(hd.meta || []).map(([k, v]) => tw(`${k}  ${v}`, 9, false))) + 24; // columna derecha: etiqueta + datos
+    const d = hd.logo ? logoDims(150, 62) : null, hasText = !!hd.name || (hd.lines || []).length > 0;
+    const avail = CW - rightW - (d ? d.lw + 12 : 0);
+    let stacked = false, leftMax = Math.max(100, avail);
+    if (d) { drawImg(hd.logo, M, y, d.lw, d.lh); leftBottom = y - d.lh; x0 = M + d.lw + 12; }
+    // si al lado del logo no cabe el texto sin tocar la columna derecha, los datos van DEBAJO del logo
+    if (d && hasText && avail < 130) { stacked = true; x0 = M; leftMax = CW - rightW; }
+    let ly = stacked ? y - d.lh - 8 : y - 13;
     (hd.name ? wrapLines(hd.name, 15, true, leftMax) : []).forEach((ln) => { text(ln, x0, ly, 15, true, INK); ly -= 17; });
     (hd.lines || []).forEach((l) => wrapLines(l, 8.5, false, leftMax).forEach((ln) => { text(ln, x0, ly, 8.5, false, GREY); ly -= 11; }));
     leftBottom = Math.min(leftBottom, ly + 6);
