@@ -443,22 +443,23 @@ function buildPdf(title, lines, opts = {}) {
     wrapLines(ms, 9, false, CW).forEach((ln) => { text(ln, (W - tw(ln, 9, false)) / 2, y - 8, 9, false, INK); y -= 12; });
     y -= 4; hline(y, LINE); y -= 16;
   } else {
-    let leftBottom = y, x0 = M;
-    const rightW = Math.max(hd.label ? tw(hd.label, 20, true) : 0, ...(hd.meta || []).map(([k, v]) => tw(`${k}  ${v}`, 9, false))) + 24; // columna derecha: etiqueta + datos
-    const d = hd.logo ? logoDims(150, 62) : null, hasText = !!hd.name || (hd.lines || []).length > 0;
-    const avail = CW - rightW - (d ? d.lw + 12 : 0);
-    let stacked = false, leftMax = Math.max(100, avail);
-    if (d) { drawImg(hd.logo, M, y, d.lw, d.lh); leftBottom = y - d.lh; x0 = M + d.lw + 12; }
-    // si al lado del logo no cabe el texto sin tocar la columna derecha, los datos van DEBAJO del logo
-    if (d && hasText && avail < 130) { stacked = true; x0 = M; leftMax = CW - rightW; }
-    let ly = stacked ? y - d.lh - 8 : y - 13;
-    (hd.name ? wrapLines(hd.name, 15, true, leftMax) : []).forEach((ln) => { text(ln, x0, ly, 15, true, INK); ly -= 17; });
-    (hd.lines || []).forEach((l) => wrapLines(l, 8.5, false, leftMax).forEach((ln) => { text(ln, x0, ly, 8.5, false, GREY); ly -= 11; }));
-    leftBottom = Math.min(leftBottom, ly + 6);
-    let ry = y - 20;
-    if (hd.label) { text(hd.label, W - M - tw(hd.label, 20, true), ry, 20, true, AC); ry -= 20; }
-    (hd.meta || []).forEach(([k, v]) => { const s = `${k}  ${v}`; text(s, W - M - tw(s, 9, false), ry, 9, false, INK); ry -= 12; });
-    y = Math.min(leftBottom, ry) - 8;
+    // Fila 1: logo (y nombre) a la izquierda · datos de la compañía a la derecha. Fila 2: título a la izquierda · datos del documento a la derecha.
+    const d = hd.logo ? logoDims(150, 62) : null, infoMax = CW * 0.42, infoLines = [];
+    (hd.lines || []).forEach((l) => wrapLines(l, 8.5, false, infoMax).forEach((ln) => infoLines.push(ln)));
+    const infoW = infoLines.length ? Math.max(...infoLines.map((ln) => tw(ln, 8.5, false))) : 0;
+    const x0 = M + (d ? d.lw + 12 : 0), nameMax = Math.max(100, CW - infoW - (infoW ? 16 : 0) - (x0 - M));
+    let ly = y - 13, bottom = y;
+    if (d) { drawImg(hd.logo, M, y, d.lw, d.lh); bottom = y - d.lh; }
+    (hd.name ? wrapLines(hd.name, 15, true, nameMax) : []).forEach((ln) => { text(ln, x0, ly, 15, true, INK); ly -= 17; });
+    if (hd.name) bottom = Math.min(bottom, ly + 6);
+    let ry = y - 11;
+    infoLines.forEach((ln) => { text(ln, W - M - tw(ln, 8.5, false), ry, 8.5, false, GREY); ry -= 11; });
+    if (infoLines.length) bottom = Math.min(bottom, ry + 6);
+    const ty = bottom - 14;
+    if (hd.label) text(hd.label, M, ty - 16, 20, true, AC);
+    let my = ty - 16;
+    (hd.meta || []).forEach(([k, v]) => { const s = `${k}  ${v}`; text(s, W - M - tw(s, 9, false), my, 9, false, INK); my -= 12; });
+    y = Math.min(hd.label ? ty - 28 : ty, my + 6) - 6;
     rect(M, y, CW, th.t === 'minimal' ? 1 : 3, AC); y -= 18;
   }
 
