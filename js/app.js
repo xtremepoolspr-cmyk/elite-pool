@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v33 · Recibo de pago';
+const APP_VERSION = 'v34 · Rutas automáticas y pausa';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -130,7 +130,12 @@ const dow = (iso) => new Date(iso + 'T12:00:00').getDay();
 const curRoute = () => T('routes').find((r) => r.date === routeDate() && r.technician_id === ME);
 const activeProps = () => { const ids = new Set(activeClients().map((c) => c.id)); return T('properties').filter((p) => ids.has(p.client_id)); };
 /** Los días de servicio son POR PROPIEDAD. */
-const scheduledProps = (iso) => activeProps().filter((p) => (p.service_days || []).includes(dow(iso)) || (p.dates || []).some((x) => x.d === iso));
+/** Pausa: {from, until, reason}. `until` = fecha en que se REANUDA el servicio (null = hasta nuevo aviso). */
+const pauseHit = (pz, iso) => !!(pz && (!pz.from || iso >= pz.from) && (!pz.until || iso < pz.until));
+const isPaused = (p, iso) => pauseHit(p.pause, iso) || pauseHit((find('clients', p.client_id) || {}).pause, iso);
+const pauseLabel = (pz) => `⏸ En pausa${pz.from && pz.from > todayISO() ? ' desde el ' + fmtDate(pz.from) : ''} · ${pz.until ? 'reanuda el ' + fmtDate(pz.until) : 'hasta nuevo aviso'}${pz.reason ? ' · ' + pz.reason : ''}`;
+const pauseActive = (pz) => !!(pz && (!pz.until || pz.until > todayISO()));
+const scheduledProps = (iso) => activeProps().filter((p) => isSched(p, iso) && !isPaused(p, iso) && !(p.skip_dates || []).includes(iso));
 const daysText = (o) => (o && o.service_days && o.service_days.length ? [...o.service_days].sort().map((d) => DAYS_S[d]).join(', ') : 'sin días asignados');
 const clientDaysText = (c) => { const u = new Set(); T('properties').filter((p) => p.client_id === c.id).forEach((p) => (p.service_days || []).forEach((d) => u.add(d))); return u.size ? [...u].sort().map((d) => DAYS_S[d]).join(', ') : 'sin días asignados'; };
 /** Datos viejos: los días que estaban en el cliente pasan a cada una de sus propiedades (una sola vez). */
@@ -149,10 +154,29 @@ const isSched = (p, iso) => (p.service_days || []).includes(dow(iso)) || (p.date
 function syncRoutes(p) {
   const today = todayISO(); let n = 0;
   T('routes').filter((r) => r.technician_id === ME && r.date >= today).forEach((r) => {
-    T('stops').filter((s) => s.route_id === r.id && s.property_id === p.id && s.status === 'PENDING' && !s.manual && !isSched(p, r.date)).forEach((s) => { remove('stops', s.id); n++; });
+    T('stops').filter((s) => s.route_id === r.id && s.property_id === p.id && s.status === 'PENDING' && !s.manual && (!isSched(p, r.date) || isPaused(p, r.date))).forEach((s) => { remove('stops', s.id); n++; });
     if (!T('stops').some((s) => s.route_id === r.id)) remove('routes', r.id);
   });
-  if (n) toast(`Se quitó de ${n} ruta(s) el día que ya no le toca a esa propiedad`);
+  if (n) toast(`Se quitó de ${n} ruta(s) el día que ya no le toca o está en pausa`);
+}
+/** Recuerda que quitaste/moviste esta parada ese día, para que la ruta automática no la vuelva a poner. */
+function skipStop(s) {
+  const r = find('routes', s.route_id), p = find('properties', s.property_id);
+  if (!r || !p || s.manual || !isSched(p, r.date) || (p.skip_dates || []).includes(r.date)) return;
+  const keep = (p.skip_dates || []).filter((d) => d >= addDays(todayISO(), -30));
+  upsert('properties', { ...p, skip_dates: [...keep, r.date] });
+}
+/** Rutas automáticas: crea/completa la ruta de cada día de hoy en adelante según los días de servicio de las propiedades. */
+function autoRoutes(dates) {
+  const today = todayISO(), max = addDays(today, 60);
+  dates.filter((d) => d >= today && d <= max).forEach((date) => {
+    const sched = scheduledProps(date); if (!sched.length) return;
+    let r = T('routes').find((x) => x.date === date && x.technician_id === ME);
+    if (!r) { r = { id: uid('r'), date, technician_id: ME, status: 'PLANNED' }; upsert('routes', r); }
+    const have = new Set(T('stops').filter((s) => s.route_id === r.id).map((s) => s.property_id));
+    const add = sched.filter((p) => !have.has(p.id));
+    if (add.length) addStopsFor(r.id, add, T('stops').filter((s) => s.route_id === r.id).length);
+  });
 }
 /** Mueve paradas PENDIENTES a la ruta de otra fecha (la crea si no existe). */
 function moveStops(ids, to) {
@@ -162,6 +186,7 @@ function moveStops(ids, to) {
   ids.map((id) => find('stops', id)).filter((s) => s && s.status === 'PENDING').forEach((s) => {
     const from = s.route_id;
     if (from === route.id) return;
+    skipStop(s);
     if (T('stops').some((x) => x.route_id === route.id && x.property_id === s.property_id)) { remove('stops', s.id); dup++; }
     else { upsert('stops', { ...s, route_id: route.id, order_index: next++, manual: true }); moved++; }
     if (!T('stops').some((x) => x.route_id === from)) remove('routes', from);
@@ -270,7 +295,13 @@ function initMap() {
   UI.mapCleanup = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
 }
 
+function pausedNote(date) {
+  const ps = activeProps().filter((p) => (p.service_days || []).includes(dow(date)) || (p.dates || []).some((x) => x.d === date)).filter((p) => isPaused(p, date));
+  return ps.length ? muted('⏸ En pausa ese día: ' + esc(ps.map((p) => clientName(p.client_id) + ' — ' + p.address).join(' · ')), 'mt-s') : '';
+}
 function routesTab() {
+  const wk = addDays(routeDate(), -dow(routeDate()));
+  autoRoutes(Array.from({ length: 7 }, (_, i) => addDays(wk, i)).concat([routeDate()]));
   const date = routeDate(), isToday = date === todayISO(), dn = DAYS[dow(date)];
   const route = curRoute(), stops = routeStops(route), done = stops.filter((s) => s.status === 'DONE').length;
   const title = isToday ? 'Ruta de hoy' : `Ruta del ${dn}`;
@@ -280,7 +311,7 @@ function routesTab() {
     const sched = scheduledProps(date);
     return { title, sub, right, body: (isToday ? carryHtml() : '') + weekStrip() + `<div class="card">${sched.length
       ? `<b>${sched.length} propiedad(es) programadas el ${dn}</b>${muted(esc(sched.map((p) => clientName(p.client_id) + ' — ' + p.address).join(' · ')))}<div class="mt"></div>${btn('Crear ruta del ' + dn, 'createRoute', { all: '0' })}`
-      : empty(`Ninguna propiedad tiene asignado el ${dn}. Asigna los días en cada propiedad (pestaña Clientes).`)}<div class="mt-s"></div>${btn('Crear ruta con todas las propiedades activas', 'createRoute', { all: '1' }, 'ghost')}</div>` };
+      : empty(`No hay servicios programados el ${dn}. Las rutas se arman solas según los días de servicio de cada propiedad (pestaña Clientes).`)}${pausedNote(date)}<div class="mt-s"></div>${btn('Crear ruta con todas las propiedades activas', 'createRoute', { all: '1' }, 'ghost')}</div>` };
   }
   const pending = stops.filter((s) => s.status !== 'DONE').map((s) => find('properties', s.property_id)).filter(Boolean);
   const url = routeUrl(pending);
@@ -288,6 +319,7 @@ function routesTab() {
   const missing = scheduledProps(date).filter((p) => !inRoute.has(p.id));
   let h = (isToday ? carryHtml() : '') + weekStrip() + `<div class="progress"><i style="width:${stops.length ? (done / stops.length) * 100 : 0}%"></i></div>${mapHtml(stops)}`;
   h += `<div class="btns" style="margin:0 0 12px">${btn('↕ Optimizar ruta', 'optimize', {}, 'sm ghost')}${url ? `<a class="btn sm ghost" href="${esc(url)}" target="_blank" rel="noopener">🗺 Abrir en Mapas</a>` : ''}${stops.some((s) => s.status === 'PENDING') ? btn('↪ Pasar pendientes a otro día', 'moveSheet', { ids: stops.filter((s) => s.status === 'PENDING').map((s) => s.id).join(',') }, 'sm ghost') : ''}</div>`;
+  h += pausedNote(date) ? `<div class="mb">${pausedNote(date)}</div>` : '';
   if (missing.length) h += `<div class="mb">${btn(`+ Añadir ${missing.length} propiedad(es) programadas que faltan`, 'addMissing', {}, 'ghost')}</div>`;
   h += '<div class="cols">' + stops.map((s) => {
     const p = find('properties', s.property_id), c = p && find('clients', p.client_id);
@@ -393,7 +425,7 @@ function refBlock(p) {
 function clientView(id) {
   const c = find('clients', id);
   if (!c) return { title: '—', body: empty('Cliente no encontrado.') };
-  let h = `<div class="card"><div>📞 ${esc(c.phone || '—')}</div><div>✉️ ${esc(c.email || '—')}</div><div>💵 ${feeLabel(c)}</div><div class="mt-s">${seg(c.fee_type || 'MONTHLY', [['MONTHLY', 'Cobro mensual'], ['PER_SERVICE', 'Por servicio']], 'setPref', { id: c.id, f: 'fee_type' })}</div>${c.notes ? muted(esc(c.notes), 'mt-s') : ''}${c.tags.length ? muted('Etiquetas: ' + esc(c.tags.join(', ')), 'mt-s') : ''}</div>
+  let h = `<div class="card"><div>📞 ${esc(c.phone || '—')}</div><div>✉️ ${esc(c.email || '—')}</div><div>💵 ${feeLabel(c)}</div>${pauseActive(c.pause) ? `<div class="mt-s"><b style="color:${COL.warn}">${esc(pauseLabel(c.pause))}</b></div>` : ''}<div class="mt-s">${btn(pauseActive(c.pause) ? '⏸ Editar pausa del cliente' : '⏸ Pausar servicio', 'pauseSheet', { t: 'c', id: c.id }, 'sm ghost')}</div><div class="mt-s">${seg(c.fee_type || 'MONTHLY', [['MONTHLY', 'Cobro mensual'], ['PER_SERVICE', 'Por servicio']], 'setPref', { id: c.id, f: 'fee_type' })}</div>${c.notes ? muted(esc(c.notes), 'mt-s') : ''}${c.tags.length ? muted('Etiquetas: ' + esc(c.tags.join(', ')), 'mt-s') : ''}</div>
     ${payCard(c)}
     <h2>Informe al cliente</h2><div class="card"><div class="chk"><span class="t">Mostrar hora de llegada y salida en el informe</span><label class="sw"><input type="checkbox" data-cflag="hide_times" data-id="${c.id}"${c.hide_times ? '' : ' checked'}><i></i></label></div>${muted('Las horas siempre quedan guardadas en tu registro; esto solo decide si salen en el PDF y el texto que le envías a este cliente.')}</div>
     <h2>Preferencias de envío guardadas</h2><div class="card">${muted('Canal predeterminado')}${seg(c.dispatch_channel_pref, CHANNELS, 'setPref', { id: c.id, f: 'dispatch_channel_pref' })}
@@ -404,6 +436,8 @@ function clientView(id) {
     h += `<div class="card"><b>${esc(p.address)}</b>${muted(esc(p.municipality) + ' · Portón: ' + esc(p.gate_code || 'sin código'))}${muted('💵 ' + propFeeLabel(p, c))}${muted('🧪 ' + SANITIZERS[chemPrefs(S.settings.chem, p.chem).sanitizer].name)}${p.access_notes ? muted(esc(p.access_notes)) : ''}
       <div class="mt-s"><b style="font-size:13px">Días de servicio de esta propiedad</b><div class="chips mt-s">${DAYS.map((n, i) => chip(DAYS_S[i], (p.service_days || []).includes(i), 'togglePropDay', { id: p.id, d: i })).join('')}</div></div>
       <div class="mt-s">${btn('📅 Airbnb / fechas específicas' + ((p.dates || []).length ? ` (${(p.dates || []).length})` : ''), 'openCal', { id: p.id }, 'sm ghost')}${(p.dates || []).filter((x) => x.d >= todayISO()).length ? muted('Próximas: ' + esc((p.dates || []).filter((x) => x.d >= todayISO()).slice(0, 4).map((x) => fmtDate(x.d).replace(/ \d{4}$/, '') + (x.t ? ' ' + fmtHM(x.t) : '')).join(' · ')) + ((p.dates || []).filter((x) => x.d >= todayISO()).length > 4 ? ' …' : ''), 'mt-s') : ''}</div>
+      ${pauseActive(p.pause) ? `<div class="mt-s"><b style="color:${COL.warn}">${esc(pauseLabel(p.pause))}</b></div>` : ''}
+      <div class="mt-s">${btn(pauseActive(p.pause) ? '⏸ Editar pausa' : '⏸ Pausar', 'pauseSheet', { t: 'p', id: p.id }, 'sm ghost')}</div>
       ${refBlock(p)}
       <div class="btns">${btn('🧪 Productos', 'propChem', { id: p.id }, 'sm ghost')}${btn('Editar', 'editProp', { id: p.id, c: c.id }, 'sm ghost')}${btn('🗑', 'delProp', { id: p.id }, 'sm ghost')}${btn('+ Cuerpo de agua', 'newWb', { p: p.id }, 'sm')}</div>`;
     T('waterBodies').filter((w) => w.property_id === p.id).forEach((w) => {
@@ -1163,11 +1197,31 @@ const A = {
     toast(n ? `Ruta creada con ${n} parada(s)` : 'Ruta creada sin paradas');
   },
   moveSheet: (d) => moveSheet(d.ids.split(',')),
+  pauseSheet: (d) => {
+    const o = d.t === 'c' ? find('clients', d.id) : find('properties', d.id), pz = o.pause || {}, today = todayISO();
+    const who = d.t === 'c' ? 'Todas las propiedades de ' + o.name : o.address;
+    openSheet('⏸ Pausar servicio', `${muted(esc(who))}<div class="fld mt"><label>Desde (primer día sin servicio)</label><input type="date" id="pz_from" value="${esc(pz.from || today)}"></div>
+      <div class="fld"><label>Reanudar el (fecha exacta en que vuelve el servicio)</label><input type="date" id="pz_until" value="${esc(pz.until || '')}"></div>
+      <div class="fld"><label>Motivo (opcional)</label><input id="pz_reason" value="${esc(pz.reason || '')}" placeholder="Ej.: de viaje, piscina cerrada"></div>
+      ${muted('Deja «Reanudar el» vacío para pausar hasta nuevo aviso. Ese día el servicio vuelve solo a las rutas.')}
+      <div class="btns mt">${btn('Guardar pausa', 'savePause', { t: d.t, id: d.id })}${o.pause ? btn('Terminar pausa', 'endPause', { t: d.t, id: d.id }, 'ghost') : ''}</div>`);
+  },
+  savePause: (d) => {
+    const from = ($('#pz_from') || {}).value || todayISO(), until = ($('#pz_until') || {}).value || null, reason = (($('#pz_reason') || {}).value || '').trim();
+    if (until && until <= from) return toast('La fecha de reanudar debe ser después de «Desde»');
+    const o = d.t === 'c' ? find('clients', d.id) : find('properties', d.id);
+    upsert(d.t === 'c' ? 'clients' : 'properties', { ...o, pause: { from, until, reason } });
+    closeSheet(); toast('Pausa guardada'); setTimeout(() => (d.t === 'c' ? T('properties').filter((p) => p.client_id === d.id) : [find('properties', d.id)]).forEach(syncRoutes), 0);
+  },
+  endPause: (d) => {
+    const o = d.t === 'c' ? find('clients', d.id) : find('properties', d.id), { pause, ...rest } = o;
+    upsert(d.t === 'c' ? 'clients' : 'properties', rest); closeSheet(); toast('Pausa terminada: vuelve a las rutas');
+  },
   doMove: (d) => { const r = moveStops(d.ids.split(','), d.to); closeSheet(); if (UI.view && UI.view.type === 'stop') UI.view = null; toast(`${r.moved + r.dup} parada(s) pasadas al ${stepDays(d.to)}`); render(); },
   doMoveDate: (d) => { const v = ($('#mv_date') || {}).value; if (!v) return toast('Escoge una fecha'); A.doMove({ ids: d.ids, to: v }); },
   dropStops: (d) => {
     const ids = d.ids.split(','); if (!confirm(`¿Quitar ${ids.length} parada(s) de la ruta? (La propiedad no se borra)`)) return;
-    ids.forEach((id) => { const s = find('stops', id); if (s && s.status === 'PENDING') { remove('stops', id); if (!T('stops').some((x) => x.route_id === s.route_id)) remove('routes', s.route_id); } });
+    ids.forEach((id) => { const s = find('stops', id); if (s && s.status === 'PENDING') { skipStop(s); remove('stops', id); if (!T('stops').some((x) => x.route_id === s.route_id)) remove('routes', s.route_id); } });
     if (d.back) UI.view = null; toast('Parada(s) quitadas de la ruta'); render();
   },
   addMissing: () => {
