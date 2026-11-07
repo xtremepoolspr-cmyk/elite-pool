@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v32 · Factura estilo recibo';
+const APP_VERSION = 'v33 · Recibo de pago';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -580,7 +580,7 @@ function payRows(inv) {
   return `<div class="row between" style="padding-top:6px"><span class="muted">Abonos recibidos</span><b style="color:${COL.ok}">-${money(paid)}</b></div><div class="row between"><b>Balance pendiente</b><span class="amount" style="color:${COL.bad}">${money(invBalance(inv, S.db))}</span></div>`;
 }
 function payList(list) {
-  return list.slice().sort((a, b) => (b.date + b.created_at).localeCompare(a.date + a.created_at)).map((p) => `<div class="row between" style="padding:5px 0"><span>${fmtDate(p.date)} · ${esc(PAY_METHODS[p.method] || p.method)}${p.note ? ' · ' + esc(p.note) : ''}</span><span><b>${money(p.amount)}</b> <button class="x" data-act="delPayment" data-id="${p.id}" aria-label="Quitar pago">✕</button></span></div>`).join('');
+  return list.slice().sort((a, b) => (b.date + b.created_at).localeCompare(a.date + a.created_at)).map((p) => `<div class="row between" style="padding:5px 0"><span>${fmtDate(p.date)} · ${esc(PAY_METHODS[p.method] || p.method)}${p.note ? ' · ' + esc(p.note) : ''}</span><span><b>${money(p.amount)}</b> <button class="x" data-act="sendReceipt" data-id="${p.id}" aria-label="Enviar recibo" title="Enviar recibo">🧾</button> <button class="x" data-act="delPayment" data-id="${p.id}" aria-label="Quitar pago">✕</button></span></div>`).join('');
 }
 function payHistory(inv) {
   const l = T('payments').filter((p) => p.invoice_id === inv.id); if (!l.length) return '';
@@ -595,16 +595,23 @@ function payCard(c) {
 /** Registra un pago. Si es de factura y se pasa del balance, el sobrante queda como saldo a favor. */
 function addPayment({ client_id, amount, date, method, note, invoice_id }) {
   amount = Math.round(+amount * 100) / 100; if (!(amount > 0)) return false;
-  const mk = (amt, inv) => upsert('payments', { id: uid('pay'), client_id, amount: amt, date: date || todayISO(), method: method || 'ATH_MOVIL', note: note || '', invoice_id: inv || null, created_at: new Date().toISOString() });
+  const mk = (amt, inv) => { const id = uid('pay'); upsert('payments', { id, client_id, amount: amt, date: date || todayISO(), method: method || 'ATH_MOVIL', note: note || '', invoice_id: inv || null, created_at: new Date().toISOString() }); return id; };
   if (invoice_id) {
     const inv = find('invoices', invoice_id), bal = invBalance(inv, S.db), now = Math.min(amount, bal), extra = Math.round((amount - now) * 100) / 100;
-    if (now > 0) mk(now, invoice_id);
-    if (extra > 0) mk(extra, null);
+    let pid = null;
+    if (now > 0) pid = mk(now, invoice_id);
+    if (extra > 0) { const x = mk(extra, null); pid = pid || x; }
     const cur = find('invoices', invoice_id);
     if (invBalance({ ...cur, status: 'X' }, S.db) <= 0.005) upsert('invoices', { ...cur, status: 'PAID' });
-    return { extra };
+    return { extra, id: pid };
   }
-  mk(amount, null); return { extra: 0 };
+  return { extra: 0, id: mk(amount, null) };
+}
+/** Abre el envío del recibo (misma pulsación del usuario). Un toque en «Enviar» y listo. */
+function offerReceipt(payId) {
+  if (!payId || !S.settings.receipt || !S.settings.receipt.ask) return;
+  const p = find('payments', payId), c = p && find('clients', p.client_id);
+  if (c) openDispatch(c.id, 'RECEIPT', buildReceiptDoc(c, p, S.settings, S.db));
 }
 function paySheet(title, hint, defAmt, act, data) {
   openSheet(title, `${hint ? muted(hint) : ''}<div class="fld mt-s"><label>Monto ($)</label><input id="pay_amt" inputmode="decimal" value="${defAmt ? defAmt : ''}" placeholder="0.00"></div><div class="fld"><label>Fecha</label><input type="date" id="pay_date" value="${todayISO()}"></div><div class="fld"><label>Método</label>${payMethodSel('pay_method')}</div><div class="fld"><label>Nota (opcional)</label><input id="pay_note" placeholder="Ej. 3 meses por adelantado"></div>${btn('Guardar pago', act, data)}`);
@@ -640,7 +647,7 @@ function createInvoiceFor(c) {
   const { invoice, itemIds, orderIds, stopIds, carryIds } = buildInvoice(c, S.db, period, todayISO());
   if (!invoice.newCount) return false;
   delete invoice.newCount;
-  invoice.terms = c.terms || S.settings.invoice.terms || 'NET15';
+  invoice.terms = c.terms || S.settings.invoice.termsCode || 'NET15';
   invoice.due_date = dueFor(invoice.terms, invoice.issue_date);
   upsert('invoices', invoice);
   carryIds.forEach((id) => upsert('invoices', { ...find('invoices', id), carried_to: invoice.id }));
@@ -770,7 +777,8 @@ function pdfView() {
     <h2 id="tpl_sec">🎨 Plantilla de factura y cotización</h2><div class="card"><div class="tplgrid">${DOC_TEMPLATES.map(([k, n, d]) => `<button class="tplc${st.invoice.template === k ? ' on' : ''}" data-act="setTemplate" data-v="${k}" style="--c:${esc(st.invoice.accent || '#0284c7')}">${tplMini(k)}<b>${n}</b><span>${d}</span></button>`).join('')}</div>
     ${muted('Color de acento (la Minimalista no usa color)', 'mt')}<div class="chips mt-s">${ACCENTS.map((c) => `<button class="swatch${(st.invoice.accent || '#0284c7') === c ? ' on' : ''}" data-act="setAccent" data-v="${c}" style="background:${c}" aria-label="${c}"></button>`).join('')}</div>${muted('Usa «👁 Factura» abajo para ver cómo queda.', 'mt-s')}</div>
     <h2>📐 Distribución de la factura</h2><div class="card"><div class="tplgrid">${[['standard', 'Estándar', 'Datos del cliente arriba, tabla y total en barra.'], ['twocol', 'Dos columnas', 'Cliente y detalles lado a lado, totales a la derecha, pago y condiciones juntos.'], ['compact', 'Compacta', 'Más pequeña y apretada: cabe en una sola hoja aunque tenga muchas líneas.'], ['recibo', 'Estilo recibo', 'Logo grande con tus datos debajo, «Facturar a» a la derecha, y pago + totales abajo en dos bloques.']].map(([k, n, d]) => `<button class="tplc${(st.invoice.layout || 'standard') === k ? ' on' : ''}" data-act="setLayout" data-v="${k}" style="--c:${esc(st.invoice.accent || '#0284c7')}">${layMini(k)}<b>${n}</b><span>${d}</span></button>`).join('')}</div>
-    <div class="fld mt"><label>Condiciones de pago por defecto (se pueden cambiar en cada factura)</label><select data-setv="invoice.terms">${optList(TERMS, st.invoice.terms || 'NET15')}</select></div>${muted('«Vence a la entrega» = vence el mismo día que se emite. «Fin de mes» = último día del mes de emisión. Se muestra en la factura y en el mensaje.', 'mt-s')}</div>
+    <div class="fld mt"><label>Condiciones de pago por defecto (se pueden cambiar en cada factura)</label><select data-setv="invoice.termsCode">${optList(TERMS, st.invoice.termsCode || 'NET15')}</select></div>${muted('«Vence a la entrega» = vence el mismo día que se emite. «Fin de mes» = último día del mes de emisión. Se muestra en la factura y en el mensaje.', 'mt-s')}</div>
+    <h2>🧾 Recibo de pago</h2><div class="card">${tgl('receipt', [['ask', 'Ofrecer enviar un recibo al marcar pagada / registrar un pago']])}${fld('Mensaje al final del recibo', `<input data-setv="receipt.msg" value="${esc(st.receipt.msg)}">`)}${muted('Al registrar un pago se abre el envío con el recibo listo (PDF o texto, según la preferencia del cliente). Solo tocas Enviar. Si lo apagas, puedes enviarlo con el botón 🧾 de cada pago.', 'mt-s')}</div>
     <h2>📝 Cotizaciones</h2><div class="card">${fld('Días de vigencia por defecto', `<input data-setv="quote.validDays" inputmode="numeric" value="${esc(st.quote.validDays)}">`)}${fld('Condiciones (salen al final del PDF)', `<textarea data-setv="quote.terms" style="min-height:70px">${esc(st.quote.terms)}</textarea>`)}${fld('Texto del pie', `<input data-setv="quote.footerText" value="${esc(st.quote.footerText)}">`)}<div class="chk"><span class="t">Línea de firma «Aceptada por»</span><label class="sw"><input type="checkbox" data-set="quote.accept"${st.quote.accept ? ' checked' : ''}><i></i></label></div></div>
     <h2>🧾 Factura — qué incluir</h2><div class="card">${tgl('invoice', INV_OPTS)}
     ${fld('Términos', `<textarea data-setv="invoice.termsText" style="min-height:70px">${esc(st.invoice.termsText)}</textarea>`)}${fld('Texto del pie', `<input data-setv="invoice.footerText" value="${esc(st.invoice.footerText)}">`)}</div>
@@ -1313,9 +1321,10 @@ const A = {
   newInvoice: () => openSheet('Factura individual', `${muted('Elige el cliente (periodo ' + todayISO().slice(0, 7) + ')')}<div class="chips mt-s">${activeClients().map((c) => chip(c.name, false, 'invFor', { id: c.id })).join('')}</div>`),
   invFor: (d) => { closeSheet(); if (!createInvoiceFor(find('clients', d.id))) alert('Ese cliente ya tiene factura de este periodo o no tiene nada que facturar.'); },
   setPayment: (d) => upsert('invoices', { ...find('invoices', d.id), payment_method: d.v }),
+  sendReceipt: (d) => { const p = find('payments', d.id), c = p && find('clients', p.client_id); if (c) openDispatch(c.id, 'RECEIPT', buildReceiptDoc(c, p, S.settings, S.db)); },
   markPaid: (d) => {
     const inv = find('invoices', d.id), bal = invBalance(inv, S.db);
-    if (bal > 0) addPayment({ client_id: inv.client_id, amount: bal, method: PAY_METHODS[inv.payment_method] ? inv.payment_method : 'ATH_MOVIL', invoice_id: inv.id });
+    if (bal > 0) { const r = addPayment({ client_id: inv.client_id, amount: bal, method: PAY_METHODS[inv.payment_method] ? inv.payment_method : 'ATH_MOVIL', invoice_id: inv.id }); render(); offerReceipt(r && r.id); }
     else upsert('invoices', { ...inv, status: 'PAID' });
   },
   payInvoice: (d) => { const inv = find('invoices', d.id); paySheet('Registrar pago / abono', `Factura ${invNumber(inv, S.db)} · balance ${money(invBalance(inv, S.db))}. Si pagan menos, queda el balance; si pagan más, el sobrante queda como saldo a favor.`, invBalance(inv, S.db), 'savePay', { id: inv.id }); const m = $('#pay_method'); if (m && PAY_METHODS[inv.payment_method]) m.value = inv.payment_method; },
@@ -1326,6 +1335,7 @@ const A = {
     const inv = d.id ? find('invoices', d.id) : null, cid = inv ? inv.client_id : d.c;
     const r = addPayment({ client_id: cid, amount, date: g('pay_date'), method: g('pay_method'), note: g('pay_note'), invoice_id: inv ? inv.id : null });
     closeSheet(); toast(r && r.extra > 0 ? `Pago guardado · ${money(r.extra)} quedó como saldo a favor` : 'Pago guardado'); render();
+    offerReceipt(r && r.id);
   },
   delPayment: (d) => {
     const p = find('payments', d.id); if (!p || !confirm('¿Quitar este pago?')) return;

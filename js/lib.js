@@ -284,7 +284,7 @@ const DEFAULT_SETTINGS = {
   invoice: {
     logo: true, showName: true, bizInfo: true, number: true, dates: true, clientInfo: true, itemType: true, subtotals: true,
     payBox: true, instructions: true, terms: true, stamp: true, footer: true,
-    template: 'classic', accent: '#0284c7', layout: 'standard', terms: 'NET15',
+    template: 'classic', accent: '#0284c7', layout: 'standard', termsCode: 'NET15',
     termsText: 'Gracias por su preferencia.',
     footerText: 'Gracias por confiar en Elite Pool Service PR',
   },
@@ -292,6 +292,7 @@ const DEFAULT_SETTINGS = {
   catalog: [],
   chem: { ...DEFAULT_CHEM },
   targets: { ...DEFAULT_TARGETS },
+  receipt: { ask: true, msg: 'Gracias por su pago.' },
   report: {
     logo: false, showName: true, bizInfo: true, clientBlock: true, times: true, tech: true, readings: true, ideal: true, previous: true,
     summary: true, doses: true, equipment: false, checklist: true, notes: true, parts: true, photos: true, footer: true,
@@ -302,7 +303,9 @@ function mergeSettings(saved) {
   const out = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
   if (saved && typeof saved === 'object') {
     if (saved && Array.isArray(saved.catalog)) out.catalog = saved.catalog.filter((x) => x && x.name).map((x) => ({ name: String(x.name), price: +x.price || 0 }));
-    for (const k of ['biz', 'pay', 'invoice', 'quote', 'report']) if (saved[k] && typeof saved[k] === 'object') Object.assign(out[k], saved[k]);
+    for (const k of ['biz', 'pay', 'invoice', 'quote', 'report', 'receipt']) if (saved[k] && typeof saved[k] === 'object') Object.assign(out[k], saved[k]);
+    // migración: antes el código de condiciones se guardaba en invoice.terms (compartido con el interruptor de términos)
+    if (saved.invoice && typeof saved.invoice.terms === 'string') { out.invoice.termsCode = TERMS.some((t) => t[0] === saved.invoice.terms) ? saved.invoice.terms : 'NET15'; out.invoice.terms = true; }
     if (out.invoice.termsText === 'Pago dentro de 15 días a partir de la fecha de emisión. Gracias por su preferencia.') out.invoice.termsText = 'Gracias por su preferencia.';
     if (saved.logo && saved.logo.data) out.logo = saved.logo;
     if (saved.chem && typeof saved.chem === 'object') out.chem = chemPrefs(saved.chem);
@@ -927,6 +930,50 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
 }
 
 
+
+/* ---------- recibo de pago ---------- */
+function receiptInfo(pay, db) {
+  const inv = pay.invoice_id ? db.invoices.find((i) => i.id === pay.invoice_id) : null;
+  if (!inv) return { inv: null, before: 0, after: 0, k: 1 };
+  const sorted = db.payments.filter((p) => p.invoice_id === inv.id).sort((a, b) => (a.date + a.created_at).localeCompare(b.date + b.created_at));
+  const idx = Math.max(0, sorted.findIndex((p) => p.id === pay.id));
+  const before = r2(sorted.slice(0, idx).reduce((s, p) => s + p.amount, 0)), after = Math.max(0, r2(inv.total_amount - before - pay.amount));
+  return { inv, before, after, k: idx + 1 };
+}
+function buildReceiptDoc(client, pay, cfgIn, db) {
+  const cfg = cfgIn || mergeSettings(null), o = cfg.invoice, th = docTheme(cfg), R = receiptInfo(pay, db), inv = R.inv;
+  const num = inv ? invNumber(inv, db) : '', recNo = inv ? `REC-${num.replace(/^EPS-/, '')}-${R.k}` : `REC-${pay.date.replace(/-/g, '')}-${pay.id.slice(-4).toUpperCase()}`;
+  const method = PAY_METHODS[pay.method] || pay.method, full = inv && R.after <= 0.005, credit = clientCredit(db, client.id);
+  const kind = !inv ? 'PAGO ADELANTADO RECIBIDO' : full ? 'PAGO RECIBIDO — FACTURA PAGADA' : 'ABONO RECIBIDO';
+  const prop = db.properties.find((p) => p.client_id === client.id);
+  const cinfo = [client.phone && `Tel. ${client.phone}`, client.email, prop && `${prop.address}, ${prop.municipality}`].filter(Boolean);
+  const L = [];
+  const det = [{ t: 'DETALLES DEL PAGO', size: 8.5, b: true, c: GREY }, { t: `Recibo N° ${recNo}`, size: 12, b: true }, { t: `Fecha: ${fmtDate(pay.date)}`, size: 9.5 }, { t: `Método: ${method}`, size: 9.5 }];
+  if (inv) det.push({ t: `Factura: ${num} (${inv.period})`, size: 9.5 });
+  if (pay.note) det.push({ t: `Nota: ${pay.note}`, size: 9, c: GREY });
+  L.push({ cols2: [[{ t: 'RECIBIDO DE', size: 8.5, b: true, c: GREY }, { t: client.name, size: 12, b: true }, ...cinfo.map((x) => ({ t: x, size: 9.5, c: GREY }))], det], bg: th.soft, border: th.edge });
+  L.push({ panel: { rows: [{ t: kind, size: 9, b: true, c: GREY }, { t: money(pay.amount), size: 26, b: true, c: th.acc }], bg: th.soft, border: th.edge } }, { space: 8 });
+  if (inv) {
+    L.push({ t: 'DETALLE DE LA FACTURA', size: 8.5, b: true, c: GREY }, { space: 2 });
+    inv.lines.forEach((l, i) => L.push({ size: 9.5, pad: 3, line: true, row: [{ t: String(i + 1), w: 0.07, c: GREY }, { t: l.description, w: 0.75 }, { t: money(l.amount), w: 0.18, align: 'right', b: true }] }));
+    L.push({ space: 6 });
+    const T = [{ l: 'Total de la factura', v: money(inv.total_amount), size: 10, pad: 3 }];
+    if (R.before > 0) T.push({ l: 'Pagos anteriores', v: '-' + money(R.before), size: 10, pad: 3 });
+    T.push({ l: 'Este pago', v: '-' + money(pay.amount), size: 10, pad: 3, b: true, c: LC.ok });
+    T.push(full ? { l: 'FACTURA PAGADA', v: money(0), size: 12, pad: 6, b: true, ...(th.flat ? { c: INK, line: true } : { bg: LC.ok }) } : { l: 'BALANCE PENDIENTE', v: money(R.after), size: 12, pad: 6, b: true, ...(th.flat ? { c: INK, line: true } : { bg: th.acc }) });
+    L.push({ totals: T, w: 0.5 }, { space: 6 });
+  }
+  if (credit > 0.005) L.push({ t: `Saldo a favor disponible: ${money(credit)} (se descontará en su próxima factura).`, size: 10, b: true, c: th.acc }, { space: 4 });
+  if (cfg.receipt && cfg.receipt.msg && cfg.receipt.msg.trim()) L.push({ space: 4 }, { t: cfg.receipt.msg.trim(), size: 10, c: GREY });
+  const text = `✅ *${cfg.biz.name}* — Recibo de pago\nHola ${client.name}, recibimos su ${inv && !full ? 'abono' : 'pago'} de *${money(pay.amount)}* (${method}) el ${fmtDate(pay.date)}.\n` + (inv ? `Factura ${num}: ${full ? 'pagada en su totalidad ✔️' : 'balance pendiente ' + money(R.after)}.\n` : (credit > 0.005 ? `Saldo a favor: ${money(credit)}.\n` : '')) + `Recibo N° ${recNo}\n${(cfg.receipt && cfg.receipt.msg) || 'Gracias por su pago.'}`;
+  const meta = [['Recibo N°', recNo], ['Fecha', fmtDate(pay.date)]];
+  return {
+    title: `Recibo ${recNo} — ${cfg.biz.name}`, text, lines: L,
+    fileName: `recibo-${recNo}-${client.name.replace(/\W+/g, '-')}.pdf`,
+    opts: { header: pdfHeader(cfg, 'invoice', 'RECIBO DE PAGO', meta), footer: o.footer ? o.footerText : '', stamp: full ? { text: 'PAGADA', color: LC.ok } : null, theme: th },
+  };
+}
+
 /* ---------- cotizaciones ---------- */
 const QUOTE_LABEL = { DRAFT: 'Borrador', SENT: 'Enviada', APPROVED: 'Aprobada', REJECTED: 'Rechazada', EXPIRED: 'Vencida' };
 const r2 = (n) => Math.round((+n || 0) * 100) / 100;
@@ -1179,4 +1226,4 @@ async function processPhoto(file, kind, coords) {
   return { uri: cv.toDataURL('image/jpeg', 0.72), w, h };
 }
 
-if (typeof module !== 'undefined') module.exports = { TERMS, termsLabel, dueFor, PAY_METHODS, invPaid, invBalance, clientCredit, clientOwed, routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
+if (typeof module !== 'undefined') module.exports = { buildReceiptDoc, TERMS, termsLabel, dueFor, PAY_METHODS, invPaid, invBalance, clientCredit, clientOwed, routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
