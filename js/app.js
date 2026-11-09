@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v35 · Enlace ATH en PDF';
+const APP_VERSION = 'v37 · Plantillas nuevas, morosos y respaldo';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -309,7 +309,7 @@ function routesTab() {
   const right = UI.installEvt ? btn('📲 Instalar', 'install', {}, 'sm') : '';
   if (!route) {
     const sched = scheduledProps(date);
-    return { title, sub, right, body: (isToday ? carryHtml() : '') + weekStrip() + `<div class="card">${sched.length
+    return { title, sub, right, body: backupBanner() + (isToday ? carryHtml() : '') + weekStrip() + `<div class="card">${sched.length
       ? `<b>${sched.length} propiedad(es) programadas el ${dn}</b>${muted(esc(sched.map((p) => clientName(p.client_id) + ' — ' + p.address).join(' · ')))}<div class="mt"></div>${btn('Crear ruta del ' + dn, 'createRoute', { all: '0' })}`
       : empty(`No hay servicios programados el ${dn}. Las rutas se arman solas según los días de servicio de cada propiedad (pestaña Clientes).`)}${pausedNote(date)}<div class="mt-s"></div>${btn('Crear ruta con todas las propiedades activas', 'createRoute', { all: '1' }, 'ghost')}</div>` };
   }
@@ -317,7 +317,7 @@ function routesTab() {
   const url = routeUrl(pending);
   const inRoute = new Set(stops.map((s) => s.property_id));
   const missing = scheduledProps(date).filter((p) => !inRoute.has(p.id));
-  let h = (isToday ? carryHtml() : '') + weekStrip() + `<div class="progress"><i style="width:${stops.length ? (done / stops.length) * 100 : 0}%"></i></div>${mapHtml(stops)}`;
+  let h = backupBanner() + (isToday ? carryHtml() : '') + weekStrip() + `<div class="progress"><i style="width:${stops.length ? (done / stops.length) * 100 : 0}%"></i></div>${mapHtml(stops)}`;
   h += `<div class="btns" style="margin:0 0 12px">${btn('↕ Optimizar ruta', 'optimize', {}, 'sm ghost')}${url ? `<a class="btn sm ghost" href="${esc(url)}" target="_blank" rel="noopener">🗺 Abrir en Mapas</a>` : ''}${stops.some((s) => s.status === 'PENDING') ? btn('↪ Pasar pendientes a otro día', 'moveSheet', { ids: stops.filter((s) => s.status === 'PENDING').map((s) => s.id).join(',') }, 'sm ghost') : ''}</div>`;
   h += pausedNote(date) ? `<div class="mb">${pausedNote(date)}</div>` : '';
   if (missing.length) h += `<div class="mb">${btn(`+ Añadir ${missing.length} propiedad(es) programadas que faltan`, 'addMissing', {}, 'ghost')}</div>`;
@@ -650,13 +650,42 @@ function offerReceipt(payId) {
 function paySheet(title, hint, defAmt, act, data) {
   openSheet(title, `${hint ? muted(hint) : ''}<div class="fld mt-s"><label>Monto ($)</label><input id="pay_amt" inputmode="decimal" value="${defAmt ? defAmt : ''}" placeholder="0.00"></div><div class="fld"><label>Fecha</label><input type="date" id="pay_date" value="${todayISO()}"></div><div class="fld"><label>Método</label>${payMethodSel('pay_method')}</div><div class="fld"><label>Nota (opcional)</label><input id="pay_note" placeholder="Ej. 3 meses por adelantado"></div>${btn('Guardar pago', act, data)}`);
 }
+/* ---- Quién me debe ---- */
+function debtors() {
+  const today = todayISO(), by = {};
+  T('invoices').filter((i) => effectiveStatus(i, today) === 'OVERDUE').forEach((i) => { const b = invBalance(i, S.db); if (b > 0) (by[i.client_id] ||= []).push({ i, b }); });
+  return Object.entries(by).map(([cid, arr]) => ({ c: find('clients', cid), arr, total: r2(arr.reduce((s, x) => s + x.b, 0)), days: Math.max(...arr.map((x) => Math.round((new Date(today + 'T12:00:00') - new Date(x.i.due_date + 'T12:00:00')) / 864e5))) })).filter((d) => d.c).sort((x, y) => y.days - x.days);
+}
+function reminderDoc(d) {
+  const first = d.c.name.split(' ')[0], biz = S.settings.biz.name || 'Elite Pool Service';
+  const facts = d.arr.map((x) => `• Factura ${invNumber(x.i, S.db)} (venció el ${fmtDate(x.i.due_date)}): ${money(x.b)}`).join('\n');
+  const pm = (d.arr[0].i.payment_method) || 'ATH_MOVIL';
+  const body = `Hola ${first}, le escribimos de ${biz} para recordarle amablemente que tiene un balance vencido de ${money(d.total)}:\n${facts}\n\n${paymentInstructions(pm, S.settings)}\n\nSi ya realizó el pago, ignore este mensaje y gracias. Quedamos atentos.`;
+  return buildBroadcastDoc(d.c, body, 'Recordatorio de pago', S.settings);
+}
+function debtorsHtml() {
+  const list = debtors(); if (!list.length) return '';
+  const tot = r2(list.reduce((s, d) => s + d.total, 0));
+  return `<h2>💸 Quién me debe (${list.length})</h2><div class="card" style="border-left:6px solid ${COL.bad}">${muted('Vencido en total: ' + money(tot))}` + list.map((d) => `<div class="row between" style="padding:8px 0;border-top:1px solid var(--border);margin-top:8px"><div class="grow"><b>${esc(d.c.name)}</b>${muted(`${money(d.total)} · ${d.days} día(s) de atraso${d.c.last_reminder ? ' · recordado ' + fmtDate(d.c.last_reminder) : ''}`)}</div>${btn('📲 Recordar', 'remind', { id: d.c.id }, 'sm')}</div>`).join('') + `${muted('Se abre WhatsApp (o tu canal preferido) con el mensaje listo; solo toca enviar.', 'mt-s')}</div>`;
+}
+const backupBanner = () => (backupStale() && !UI.bkSnooze && T('clients').length ? `<div class="card" style="border-left:6px solid ${COL.warn}"><b>💾 ${S.lastBackup ? 'Hace ' + Math.max(1, Math.round((Date.now() - new Date(S.lastBackup).getTime()) / 864e5)) + ' día(s) sin respaldo' : 'Aún no has hecho un respaldo'}</b>${muted('Tus datos viven solo en este teléfono. Envíatelo por correo, WhatsApp o Drive: toma 10 segundos.')}<div class="btns mt-s">${btn('📤 Respaldar ahora', 'shareBackup', {}, 'sm')}${btn('Más tarde', 'snoozeBackup', {}, 'sm ghost')}</div></div>` : '');
+/** Crea (como borrador) las facturas de cuota mensual del mes la primera vez que abres la app ese mes. */
+function autoInvoices() {
+  const a = S.settings.auto, today = todayISO(), period = today.slice(0, 7);
+  if (!a || !a.invoices || a.last === period || !activeClients().length) return;
+  a.last = period;
+  const targets = activeClients().filter((c) => (c.fee_type || 'MONTHLY') === 'MONTHLY' && !pauseHit(c.pause, today) && !T('invoices').some((i) => i.client_id === c.id && i.period === period));
+  const n = targets.filter(createInvoiceFor).length;
+  persist();
+  if (n) toast(`Se crearon ${n} factura(s) de ${period} como borrador. Revísalas en Facturas.`);
+}
 function invoicesTab() {
   if (UI.invMode === 'quotes') return quotesTab();
   const period = todayISO().slice(0, 7);
   const list = T('invoices').filter((i) => UI.invFilter === 'ALL' || invView(i) === UI.invFilter).sort((a, b) => b.created_at.localeCompare(a.created_at));
   const owed = T('invoices').reduce((s, i) => s + invBalance(i, S.db), 0), paid = T('invoices').reduce((s, i) => s + (i.status === 'PAID' ? i.total_amount : invPaid(i, S.db)), 0);
   let h = `<div class="row mb"><div class="card grow" style="margin:0">${muted('Por cobrar')}<div class="big" style="color:${COL.bad}">${money(owed)}</div></div><div class="card grow" style="margin:0">${muted('Cobrado')}<div class="big" style="color:${COL.ok}">${money(paid)}</div></div></div>
-    ${btn('⚡ Procesar facturación del mes (1 toque)', 'bulkInvoices', {}, 'dark')}<div class="mt"></div>
+    ${btn('⚡ Procesar facturación del mes (1 toque)', 'bulkInvoices', {}, 'dark')}<div class="mt"></div>${debtorsHtml()}
     <div class="chips">${chip('Todas', UI.invFilter === 'ALL', 'setInvFilter', { v: 'ALL' })}${Object.keys(STATUS_LABEL).map((s) => chip(STATUS_LABEL[s], UI.invFilter === s, 'setInvFilter', { v: s }, INV_COLOR[s])).join('')}</div>`;
   h += list.length ? '<div class="cols">' + list.map((i) => `<div class="card bar tap" style="border-left-color:${INV_COLOR[invView(i)]}" data-act="openInvoice" data-id="${i.id}"><div class="row between"><b>${esc(clientName(i.client_id))}</b>${badge(STATUS_LABEL[invView(i)], INV_COLOR[invView(i)])}</div>${muted(`${i.period} · vence ${fmtDate(i.due_date)}`, 'mt-s')}<div class="amount">${money(i.total_amount)}</div>${invPaid(i, S.db) > 0 && i.status !== 'PAID' && !i.carried_to ? muted('Abonado ' + money(invPaid(i, S.db)) + ' · balance ' + money(invBalance(i, S.db))) : ''}</div>`).join('') + '</div>' : empty('No hay facturas en esta vista.');
   return { title: 'Facturación', sub: `Periodo ${period}`, right: btn('+ Factura', 'newInvoice', {}, 'sm'), body: invModeSeg() + '<div class="mt"></div>' + h + `<div class="mt"></div>${btn('🎨 Cambiar plantilla de factura y cotización', 'openTemplates', {}, 'sm ghost')}` };
@@ -809,12 +838,12 @@ function pdfView() {
     <h2>🧪 Productos químicos que uso</h2><div class="card">${chemSelects(chemPrefs(st.chem), 'data-setv-chem')}${muted('Son los productos predeterminados para calcular dosis. Cada propiedad puede tener los suyos (botón 🧪 en la propiedad).', 'mt-s')}</div>
     <h2>🎯 Valores meta predeterminados</h2><div class="card"><div class="g2">${PARAMS.map((p) => fld(p.label, `<input data-setv="targets.${p.key}" inputmode="decimal" value="${esc(st.targets[p.key])}">`)).join('')}</div></div>
     <h2 id="tpl_sec">🎨 Plantilla de factura y cotización</h2><div class="card"><div class="tplgrid">${DOC_TEMPLATES.map(([k, n, d]) => `<button class="tplc${st.invoice.template === k ? ' on' : ''}" data-act="setTemplate" data-v="${k}" style="--c:${esc(st.invoice.accent || '#0284c7')}">${tplMini(k)}<b>${n}</b><span>${d}</span></button>`).join('')}</div>
-    ${muted('Color de acento (la Minimalista no usa color)', 'mt')}<div class="chips mt-s">${ACCENTS.map((c) => `<button class="swatch${(st.invoice.accent || '#0284c7') === c ? ' on' : ''}" data-act="setAccent" data-v="${c}" style="background:${c}" aria-label="${c}"></button>`).join('')}</div>${muted('Usa «👁 Factura» abajo para ver cómo queda.', 'mt-s')}</div>
-    <h2>📐 Distribución de la factura</h2><div class="card"><div class="tplgrid">${[['standard', 'Estándar', 'Datos del cliente arriba, tabla y total en barra.'], ['twocol', 'Dos columnas', 'Cliente y detalles lado a lado, totales a la derecha, pago y condiciones juntos.'], ['compact', 'Compacta', 'Más pequeña y apretada: cabe en una sola hoja aunque tenga muchas líneas.'], ['recibo', 'Estilo recibo', 'Logo grande con tus datos debajo, «Facturar a» a la derecha, y pago + totales abajo en dos bloques.']].map(([k, n, d]) => `<button class="tplc${(st.invoice.layout || 'standard') === k ? ' on' : ''}" data-act="setLayout" data-v="${k}" style="--c:${esc(st.invoice.accent || '#0284c7')}">${layMini(k)}<b>${n}</b><span>${d}</span></button>`).join('')}</div>
+    ${muted('Color de acento', 'mt')}<div class="chips mt-s">${ACCENTS.map((c) => `<button class="swatch${(st.invoice.accent || '#0284c7') === c ? ' on' : ''}" data-act="setAccent" data-v="${c}" style="background:${c}" aria-label="${c}"></button>`).join('')}</div>${muted('Usa «👁 Factura» abajo para ver cómo queda.', 'mt-s')}</div>
+    <h2>📐 Distribución de la factura</h2><div class="card"><div class="tplgrid">${INV_LAYOUTS.map(([k, n, d]) => `<button class="tplc${(INV_LAYOUTS.some((x) => x[0] === st.invoice.layout) ? st.invoice.layout : 'twocol') === k ? ' on' : ''}" data-act="setLayout" data-v="${k}" style="--c:${esc(st.invoice.accent || '#0284c7')}">${layMini(k)}<b>${n}</b><span>${d}</span></button>`).join('')}</div>
     <div class="fld mt"><label>Condiciones de pago por defecto (se pueden cambiar en cada factura)</label><select data-setv="invoice.termsCode">${optList(TERMS, st.invoice.termsCode || 'NET15')}</select></div>${muted('«Vence a la entrega» = vence el mismo día que se emite. «Fin de mes» = último día del mes de emisión. Se muestra en la factura y en el mensaje.', 'mt-s')}</div>
     <h2>🧾 Recibo de pago</h2><div class="card">${tgl('receipt', [['ask', 'Ofrecer enviar un recibo al marcar pagada / registrar un pago']])}${fld('Mensaje al final del recibo', `<input data-setv="receipt.msg" value="${esc(st.receipt.msg)}">`)}${muted('Al registrar un pago se abre el envío con el recibo listo (PDF o texto, según la preferencia del cliente). Solo tocas Enviar. Si lo apagas, puedes enviarlo con el botón 🧾 de cada pago.', 'mt-s')}</div>
     <h2>📝 Cotizaciones</h2><div class="card">${fld('Días de vigencia por defecto', `<input data-setv="quote.validDays" inputmode="numeric" value="${esc(st.quote.validDays)}">`)}${fld('Condiciones (salen al final del PDF)', `<textarea data-setv="quote.terms" style="min-height:70px">${esc(st.quote.terms)}</textarea>`)}${fld('Texto del pie', `<input data-setv="quote.footerText" value="${esc(st.quote.footerText)}">`)}<div class="chk"><span class="t">Línea de firma «Aceptada por»</span><label class="sw"><input type="checkbox" data-set="quote.accept"${st.quote.accept ? ' checked' : ''}><i></i></label></div></div>
-    <h2>🧾 Factura — qué incluir</h2><div class="card">${tgl('invoice', INV_OPTS)}
+    <h2>🧾 Factura — qué incluir</h2><div class="card">${tgl('auto', [['invoices', 'Crear solas las facturas de cuota mensual al empezar cada mes (quedan como borrador para que las revises y envíes)']])}${tgl('invoice', INV_OPTS)}
     ${fld('Términos', `<textarea data-setv="invoice.termsText" style="min-height:70px">${esc(st.invoice.termsText)}</textarea>`)}${fld('Texto del pie', `<input data-setv="invoice.footerText" value="${esc(st.invoice.footerText)}">`)}</div>
     <h2>📄 Informe de servicio — qué incluir</h2><div class="card">${tgl('report', REP_OPTS)}
     ${fld('Texto del pie', `<input data-setv="report.footerText" value="${esc(st.report.footerText)}">`)}</div>
@@ -889,16 +918,17 @@ function renderCat() {
 }
 const layMini = (k) => {
   const g = '<i style="display:block;height:4px;border-radius:2px;background:#e2e8f0;margin:3px 0"></i>', ac = 'var(--c)', bar = `<i style="display:block;height:6px;background:${ac};margin:4px 0"></i>`;
-  if (k === 'twocol') return `<div class="tm"><div style="display:flex;gap:4px"><i style="flex:1;height:16px;background:#eef2f7;border-radius:2px"></i><i style="flex:1;height:16px;background:#eef2f7;border-radius:2px"></i></div>${bar}${g}${g}<i style="display:block;height:7px;width:50%;margin-left:50%;background:${ac};margin-top:4px"></i></div>`;
-  if (k === 'recibo') return `<div class="tm"><div style="display:flex;gap:6px"><div style="flex:1"><i style="display:block;height:14px;width:70%;background:#cbd5e1;border-radius:2px"></i>${g}</div><div style="flex:1">${g}${g}</div></div>${bar}${g}<div style="display:flex;gap:6px;margin-top:4px"><i style="flex:1;height:12px;background:${ac}"></i><i style="flex:1;height:12px;background:#94a3b8"></i></div></div>`;
-  if (k === 'compact') return `<div class="tm"><i style="display:block;height:3px;width:50%;background:#94a3b8;border-radius:2px"></i>${bar}${g.replace('4px', '2px')}${g.replace('4px', '2px')}${g.replace('4px', '2px')}${g.replace('4px', '2px')}<i style="display:block;height:5px;width:45%;margin-left:55%;background:${ac}"></i></div>`;
-  return `<div class="tm"><i style="display:block;height:5px;width:45%;background:#334155;border-radius:2px"></i>${g}${bar}${g}${g}<i style="display:block;height:7px;background:${ac};margin:4px 0"></i></div>`;
+  const two = '<div style="display:flex;gap:4px"><i style="flex:1;height:14px;background:#eef2f7;border-radius:2px"></i><i style="flex:1;height:14px;background:#eef2f7;border-radius:2px"></i></div>';
+  if (k === 'summary') return `<div class="tm"><i style="display:block;height:9px;background:${ac};margin-bottom:4px"></i>${two}${bar}${g}${g}</div>`;
+  if (k === 'plain') return `<div class="tm"><div style="display:flex;gap:4px"><i style="flex:1;height:12px;border:1px solid #cbd5e1;border-radius:2px"></i><i style="flex:1;height:12px;border:1px solid #cbd5e1;border-radius:2px"></i></div><i style="display:block;height:1px;background:#334155;margin:6px 0"></i>${g}${g}<i style="display:block;height:1px;width:45%;margin-left:55%;background:#334155;margin-top:5px"></i></div>`;
+  if (k === 'side') return `<div class="tm">${two}${bar}${g}${g}<div style="display:flex;gap:6px;margin-top:4px"><i style="flex:1;height:12px;background:#eef2f7;border:1px solid #cbd5e1"></i><i style="flex:1;height:12px;background:${ac}"></i></div></div>`;
+  return `<div class="tm">${two}${bar}${g}${g}<i style="display:block;height:7px;width:50%;margin-left:50%;background:${ac};margin-top:4px"></i></div>`;
 };
 const tplMini = (k) => {
   const g = '<i style="display:block;height:4px;border-radius:2px;background:#e2e8f0;margin:3px 0"></i>', ac = 'var(--c)';
-  if (k === 'modern') return `<div class="tm"><div style="background:${ac};height:20px;margin:-6px -6px 6px"></div>${g}${g}<i style="display:block;height:7px;background:${ac};margin:4px 0"></i>${g}</div>`;
-  if (k === 'minimal') return `<div class="tm"><i style="display:block;height:5px;width:40%;background:#334155;border-radius:2px"></i><i style="display:block;height:1px;background:#334155;margin:5px 0"></i>${g}${g}<i style="display:block;height:1px;background:#334155;margin:6px 0"></i></div>`;
-  if (k === 'elegant') return `<div class="tm" style="text-align:center"><i style="display:block;height:8px;width:30%;background:#cbd5e1;border-radius:4px;margin:0 auto 3px"></i><i style="display:block;height:5px;width:55%;background:#334155;border-radius:2px;margin:0 auto 4px"></i><i style="display:block;height:2px;width:40%;background:${ac};margin:4px auto"></i>${g}<i style="display:block;height:7px;background:${ac};margin:4px 0"></i></div>`;
+  if (k === 'side') return `<div class="tm" style="border-left:7px solid ${ac};padding-left:4px"><i style="display:block;height:5px;width:45%;background:#334155;border-radius:2px"></i><i style="display:block;height:1px;background:${ac};margin:5px 0"></i>${g}<i style="display:block;height:7px;background:${ac};margin:4px 0"></i>${g}</div>`;
+  if (k === 'frame') return `<div class="tm"><div style="background:#eef6fb;border:1px solid #bcd9ea;border-bottom:3px solid ${ac};height:20px;margin-bottom:6px"></div>${g}<i style="display:block;height:7px;background:${ac};margin:4px 0"></i>${g}</div>`;
+  if (k === 'bold') return `<div class="tm"><div style="display:flex;justify-content:space-between;align-items:center"><i style="display:block;height:10px;width:52%;background:${ac};border-radius:2px"></i><i style="display:block;height:8px;width:20%;background:#cbd5e1;border-radius:3px"></i></div><i style="display:block;height:3px;background:${ac};margin:5px 0"></i>${g}<i style="display:block;height:7px;background:${ac};margin:4px 0"></i>${g}</div>`;
   return `<div class="tm"><i style="display:block;height:5px;width:45%;background:#334155;border-radius:2px"></i><i style="display:block;height:3px;background:${ac};margin:5px 0"></i>${g}<i style="display:block;height:7px;background:${ac};margin:4px 0"></i>${g}</div>`;
 };
 
@@ -1059,6 +1089,11 @@ function saveDates(p, dates) { upsert('properties', { ...p, dates: dates.sort((a
 const A = {
   noop() {},
   setInvMode: (d) => { UI.invMode = d.v; render(); },
+  remind: (d) => {
+    const dt = debtors().find((x) => x.c.id === d.id); if (!dt) return toast('Ya no tiene balance vencido');
+    openDispatch(dt.c.id, 'BROADCAST', reminderDoc(dt), { forceFormat: 'TEXT', after: () => upsert('clients', { ...find('clients', dt.c.id), last_reminder: todayISO() }) });
+  },
+  snoozeBackup: () => { UI.bkSnooze = true; render(); },
   setQFilter: (d) => { UI.qFilter = d.v; render(); },
   setLayout: (d) => { S.settings.invoice.layout = d.v; persist(); render(); },
   setTemplate: (d) => { S.settings.invoice.template = d.v; persist(); render(); },
@@ -1542,7 +1577,8 @@ async function boot() {
   if (!S.db) { S.db = emptyDb(); S.demoPurged = true; }
   if (!S.demoPurged) { purgeDemo(); S.demoPurged = true; persist(); }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-  render(); maybeSync();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && S.db) { autoInvoices(); scheduleRender(); } });
+  autoInvoices(); render(); maybeSync();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 if (typeof window !== 'undefined' && !window.__TEST__) boot();

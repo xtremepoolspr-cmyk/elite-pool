@@ -284,7 +284,7 @@ const DEFAULT_SETTINGS = {
   invoice: {
     logo: true, showName: true, bizInfo: true, number: true, dates: true, clientInfo: true, itemType: true, subtotals: true,
     payBox: true, instructions: true, terms: true, stamp: true, footer: true,
-    template: 'classic', accent: '#0284c7', layout: 'standard', termsCode: 'NET15',
+    template: 'classic', accent: '#0284c7', layout: 'twocol', termsCode: 'NET15',
     termsText: 'Gracias por su preferencia.',
     footerText: 'Gracias por confiar en Elite Pool Service PR',
   },
@@ -293,6 +293,7 @@ const DEFAULT_SETTINGS = {
   chem: { ...DEFAULT_CHEM },
   targets: { ...DEFAULT_TARGETS },
   receipt: { ask: true, msg: 'Gracias por su pago.' },
+  auto: { invoices: true, last: '' },
   report: {
     logo: false, showName: true, bizInfo: true, clientBlock: true, times: true, tech: true, readings: true, ideal: true, previous: true,
     summary: true, doses: true, equipment: false, checklist: true, notes: true, parts: true, photos: true, footer: true,
@@ -303,7 +304,7 @@ function mergeSettings(saved) {
   const out = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
   if (saved && typeof saved === 'object') {
     if (saved && Array.isArray(saved.catalog)) out.catalog = saved.catalog.filter((x) => x && x.name).map((x) => ({ name: String(x.name), price: +x.price || 0 }));
-    for (const k of ['biz', 'pay', 'invoice', 'quote', 'report', 'receipt']) if (saved[k] && typeof saved[k] === 'object') Object.assign(out[k], saved[k]);
+    for (const k of ['biz', 'pay', 'invoice', 'quote', 'report', 'receipt', 'auto']) if (saved[k] && typeof saved[k] === 'object') Object.assign(out[k], saved[k]);
     // migración: antes el código de condiciones se guardaba en invoice.terms (compartido con el interruptor de términos)
     if (saved.invoice && typeof saved.invoice.terms === 'string') { out.invoice.termsCode = TERMS.some((t) => t[0] === saved.invoice.terms) ? saved.invoice.terms : 'NET15'; out.invoice.terms = true; }
     if (out.invoice.termsText === 'Pago dentro de 15 días a partir de la fecha de emisión. Gracias por su preferencia.') out.invoice.termsText = 'Gracias por su preferencia.';
@@ -347,6 +348,91 @@ function winAnsi(s) {
   }
   return out;
 }
+/* ---------- Código QR (byte, corrección M, versiones 1–20), sin librerías ---------- */
+const QR_BLK = [null, [10, [1, 16]], [16, [1, 28]], [26, [1, 44]], [18, [2, 32]], [24, [2, 43]], [16, [4, 27]], [18, [4, 31]], [22, [2, 38], [2, 39]], [22, [3, 36], [2, 37]], [26, [4, 43], [1, 44]], [30, [1, 50], [4, 51]], [22, [6, 36], [2, 37]], [22, [8, 37], [1, 38]], [24, [4, 40], [5, 41]], [24, [5, 41], [5, 42]], [28, [7, 45], [3, 46]], [28, [10, 46], [1, 47]], [26, [9, 43], [4, 44]], [26, [3, 44], [11, 45]], [26, [3, 41], [13, 42]]];
+const QR_ALIGN = [null, [], [6, 18], [6, 22], [6, 26], [6, 30], [6, 34], [6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50], [6, 30, 54], [6, 32, 58], [6, 34, 62], [6, 26, 46, 66], [6, 26, 48, 70], [6, 26, 50, 74], [6, 30, 54, 78], [6, 30, 56, 82], [6, 30, 58, 86], [6, 34, 62, 90]];
+const QR_EXP = new Array(512), QR_LOG = new Array(256);
+(() => { let x = 1; for (let i = 0; i < 255; i++) { QR_EXP[i] = x; QR_LOG[x] = i; x <<= 1; if (x & 256) x ^= 0x11d; } for (let i = 255; i < 512; i++) QR_EXP[i] = QR_EXP[i - 255]; })();
+const qrMul = (a, b) => (a && b ? QR_EXP[QR_LOG[a] + QR_LOG[b]] : 0);
+function qrRs(data, n) {
+  let g = [1];
+  for (let i = 0; i < n; i++) { const ng = new Array(g.length + 1).fill(0); g.forEach((c, j) => { ng[j] ^= c; ng[j + 1] ^= qrMul(c, QR_EXP[i]); }); g = ng; }
+  const r = new Array(n).fill(0);
+  data.forEach((d) => { const f = d ^ r.shift(); r.push(0); if (f) for (let i = 0; i < n; i++) r[i] ^= qrMul(g[i + 1], f); });
+  return r;
+}
+/** Devuelve una matriz de booleanos (true = módulo oscuro) con el texto en un QR, o null si no cabe. */
+function qrMatrix(text) {
+  const bytes = [...unescape(encodeURIComponent(text))].map((c) => c.charCodeAt(0));
+  let ver = 0, nData = 0;
+  for (let v = 1; v <= 20; v++) {
+    const [ec, ...gs] = QR_BLK[v], blocks = gs.reduce((s, g) => s + g[0], 0), total = QR_TOT[v], dcw = total - blocks * ec;
+    if (4 + (v < 10 ? 8 : 16) + bytes.length * 8 <= dcw * 8) { ver = v; nData = dcw; break; }
+  }
+  if (!ver) return null;
+  const bits = []; const put = (val, n) => { for (let i = n - 1; i >= 0; i--) bits.push((val >>> i) & 1); };
+  put(4, 4); put(bytes.length, ver < 10 ? 8 : 16); bytes.forEach((b) => put(b, 8));
+  for (let i = 0; i < 4 && bits.length < nData * 8; i++) bits.push(0);
+  while (bits.length % 8) bits.push(0);
+  const cw = []; for (let i = 0; i < bits.length; i += 8) cw.push(parseInt(bits.slice(i, i + 8).join(''), 2));
+  for (let p = 0; cw.length < nData; p++) cw.push(p % 2 ? 0x11 : 0xec);
+  const [ecn, ...gs] = QR_BLK[ver], blks = []; let pos = 0;
+  gs.forEach(([cnt, len]) => { for (let i = 0; i < cnt; i++) { blks.push(cw.slice(pos, pos + len)); pos += len; } });
+  const ecs = blks.map((b) => qrRs(b, ecn)), out = [];
+  const maxLen = Math.max(...blks.map((b) => b.length));
+  for (let i = 0; i < maxLen; i++) blks.forEach((b) => { if (i < b.length) out.push(b[i]); });
+  for (let i = 0; i < ecn; i++) ecs.forEach((e) => out.push(e[i]));
+  const n = 17 + 4 * ver, m = Array.from({ length: n }, () => new Array(n).fill(false)), fn = Array.from({ length: n }, () => new Array(n).fill(false));
+  const setFn = (x, y, d) => { if (x >= 0 && y >= 0 && x < n && y < n) { m[y][x] = !!d; fn[y][x] = true; } };
+  for (let i = 0; i < n; i++) { setFn(6, i, i % 2 === 0); setFn(i, 6, i % 2 === 0); }
+  const finder = (cx, cy) => { for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) { const d = Math.max(Math.abs(dx), Math.abs(dy)); setFn(cx + dx, cy + dy, d !== 2 && d !== 4); } };
+  finder(3, 3); finder(n - 4, 3); finder(3, n - 4);
+  const ap = QR_ALIGN[ver];
+  ap.forEach((a, i) => ap.forEach((b, j) => { if ((i === 0 && j === 0) || (i === 0 && j === ap.length - 1) || (i === ap.length - 1 && j === 0)) return; for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) setFn(a + dx, b + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1); }));
+  const fmt = (mask) => {
+    const data = (0 << 3) | mask; let rem = data << 10;
+    for (let i = 14; i >= 10; i--) if ((rem >>> i) & 1) rem ^= 0x537 << (i - 10);
+    const b = ((data << 10) | rem) ^ 0x5412, bit = (i) => (b >>> i) & 1;
+    for (let i = 0; i <= 5; i++) setFn(8, i, bit(i));
+    setFn(8, 7, bit(6)); setFn(8, 8, bit(7)); setFn(7, 8, bit(8));
+    for (let i = 9; i < 15; i++) setFn(14 - i, 8, bit(i));
+    for (let i = 0; i < 8; i++) setFn(n - 1 - i, 8, bit(i));
+    for (let i = 8; i < 15; i++) setFn(8, n - 15 + i, bit(i));
+    setFn(8, n - 8, true);
+  };
+  fmt(0);
+  if (ver >= 7) {
+    let rem = ver; for (let i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1f25);
+    const b = (ver << 12) | rem;
+    for (let i = 0; i < 18; i++) { const bit = (b >>> i) & 1, a = n - 11 + (i % 3), c = Math.floor(i / 3); setFn(a, c, bit); setFn(c, a, bit); }
+  }
+  let k = 0;
+  for (let right = n - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (let vert = 0; vert < n; vert++) for (let j = 0; j < 2; j++) {
+      const x = right - j, up = ((right + 1) & 2) === 0, y = up ? n - 1 - vert : vert;
+      if (!fn[y][x] && k < out.length * 8) { m[y][x] = ((out[k >> 3] >>> (7 - (k & 7))) & 1) === 1; k++; }
+    }
+  }
+  const MASKS = [(x, y) => (x + y) % 2 === 0, (x, y) => y % 2 === 0, (x) => x % 3 === 0, (x, y) => (x + y) % 3 === 0, (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0, (x, y) => ((x * y) % 2) + ((x * y) % 3) === 0, (x, y) => (((x * y) % 2) + ((x * y) % 3)) % 2 === 0, (x, y) => (((x + y) % 2) + ((x * y) % 3)) % 2 === 0];
+  const applyMask = (mask) => { for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) if (!fn[y][x] && MASKS[mask](x, y)) m[y][x] = !m[y][x]; };
+  const penalty = () => {
+    let p = 0;
+    const runs = (get) => { for (let a = 0; a < n; a++) { let run = 1; for (let b = 1; b < n; b++) { if (get(a, b) === get(a, b - 1)) { run++; if (run === 5) p += 3; else if (run > 5) p++; } else run = 1; } } };
+    runs((a, b) => m[a][b]); runs((a, b) => m[b][a]);
+    for (let y = 0; y < n - 1; y++) for (let x = 0; x < n - 1; x++) if (m[y][x] === m[y][x + 1] && m[y][x] === m[y + 1][x] && m[y][x] === m[y + 1][x + 1]) p += 3;
+    const pat = [1, 0, 1, 1, 1, 0, 1], chk = (get) => { for (let a = 0; a < n; a++) for (let b = 0; b + 6 < n; b++) { if (pat.every((v, i) => (get(a, b + i) ? 1 : 0) === v)) { const L = [b - 4, b - 3, b - 2, b - 1], R = [b + 7, b + 8, b + 9, b + 10]; const z = (arr) => arr.every((c) => c < 0 || c >= n || !get(a, c)); if (z(L) || z(R)) p += 40; } } };
+    chk((a, b) => m[a][b]); chk((a, b) => m[b][a]);
+    const dark = m.reduce((s, r) => s + r.filter(Boolean).length, 0); p += Math.floor(Math.abs((dark * 20) - (n * n * 10)) / (n * n)) * 10;
+    return p;
+  };
+  let best = 0, bestP = Infinity;
+  for (let mask = 0; mask < 8; mask++) { applyMask(mask); fmt(mask); const p = penalty(); if (p < bestP) { bestP = p; best = mask; } applyMask(mask); }
+  applyMask(best); fmt(best);
+  return m;
+}
+const QR_TOT = [0, 26, 44, 70, 100, 134, 172, 196, 242, 292, 346, 404, 466, 532, 581, 655, 733, 815, 901, 991, 1085];
+
 const pdfEsc = (s) => s.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
 const toBytes = (str) => { const u = new Uint8Array(str.length); for (let i = 0; i < str.length; i++) u[i] = str.charCodeAt(i) & 255; return u; };
 const b64ToBytes = (b64) => { const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
@@ -408,14 +494,14 @@ function buildPdf(title, lines, opts = {}) {
   const hline = (yy, c = LINE, x0 = M, x1 = W - M) => ops.push(`${col(c)} RG 0.6 w ${x0} ${yy.toFixed(1)} m ${x1} ${yy.toFixed(1)} l S`);
   const imgIdx = (im) => { let i = images.findIndex((x) => x.data === im.data); if (i < 0) { images.push(im); i = images.length - 1; } used.add(i); return i; };
   const drawImg = (im, x, yTop, w, h) => ops.push(`q ${w.toFixed(1)} 0 0 ${h.toFixed(1)} ${x.toFixed(1)} ${(yTop - h).toFixed(1)} cm /Im${imgIdx(im) + 1} Do Q`);
-  const newPage = () => { if (ops) pages.push({ ops, used, annots }); ops = []; used = new Set(); annots = []; y = H - M; };
+  const newPage = () => { if (ops) pages.push({ ops, used, annots }); ops = []; used = new Set(); annots = []; y = H - M; if (((opts.theme || {}).t) === 'side') rect(0, 0, 16, H, (opts.theme || {}).acc || ACC); };
   const need = (h) => { if (y - h < BOTTOM) newPage(); };
 
   newPage();
   // ----- encabezado (primera página; varía según la plantilla) -----
   const hd = opts.header || { name: 'Elite Pool Service PR', lines: [], label: '', meta: [] };
   const th = opts.theme || { t: 'classic', acc: ACC }, AC = th.acc || ACC, WHITE = [1, 1, 1];
-  const lsz = th.t === 'elegant' ? 15 : 20;
+  const lsz = 20;
   const bigLogo = !hd.name && hd.logo; // el logo ya trae el nombre: se muestra más grande
   const logoDims = (mw, mh) => { if (bigLogo) { mw *= 1.5; mh *= 1.4; } const sc = Math.min(mw / hd.logo.w, mh / hd.logo.h); return { lw: hd.logo.w * sc, lh: hd.logo.h * sc }; };
   if (opts.hdrStyle === 'split') {
@@ -432,39 +518,26 @@ function buildPdf(title, lines, opts = {}) {
       ry -= 8; text('Facturar a', rx, ry - 9, 9.5, true, INK);
       hd.billTo.forEach((s, i) => wrapLines(s, 9.5, i === 0, rw - 80).forEach((ln) => { text(ln, W - M - tw(ln, 9.5, i === 0), ry - 9, 9.5, i === 0, INK); ry -= 13; }));
     }
-    y = Math.min(ly, ry) - 6; rect(M, y, CW, th.t === 'minimal' ? 1 : 2, AC); y -= 16;
-  } else if (th.t === 'modern') {
-    let x0 = M, lh = 0;
-    if (hd.logo) { const d = logoDims(120, 56); lh = d.lh; x0 = M + d.lw + 20; }
-    let LS = lsz, labW = hd.label ? tw(hd.label, LS, true) + 18 : 0;
-    if (hd.label && W - M - labW - x0 < 150) { LS = 14; labW = tw(hd.label, LS, true) + 18; } // título largo + logo grande: se achica el título
-    const leftMax = Math.max(120, W - M - labW - x0);
-    const nl = hd.name ? wrapLines(hd.name, 16, true, leftMax) : [], bl = [];
-    (hd.lines || []).forEach((l) => wrapLines(l, 8.5, false, leftMax).forEach((ln) => bl.push(ln)));
-    const bandH = Math.max(86, 22 + nl.length * 19 + bl.length * 11 + 14, lh + 28);
-    rect(0, H - bandH, W, bandH, AC);
-    if (hd.logo) { const d = logoDims(120, 56); rect(M - 5, H - bandH / 2 - d.lh / 2 - 5, d.lw + 10, d.lh + 10, WHITE); drawImg(hd.logo, M, H - bandH / 2 + d.lh / 2, d.lw, d.lh); }
-    let ly = H - 30; nl.forEach((ln) => { text(ln, x0, ly, 16, true, WHITE); ly -= 19; });
-    bl.forEach((ln) => { text(ln, x0, ly + 3, 8.5, false, [0.9, 0.96, 1]); ly -= 11; });
-    if (hd.label) text(hd.label, W - M - tw(hd.label, LS, true), H - 38, LS, true, WHITE);
-    let ry = H - bandH - 18;
-    (hd.meta || []).forEach(([k, v]) => { const s = `${k}  ${v}`; text(s, W - M - tw(s, 9, false), ry, 9, false, INK); ry -= 12; });
-    y = Math.min(ry, H - bandH - 12) - 6;
-  } else if (th.t === 'elegant') {
-    y = H - M + 6;
-    if (hd.logo) { const d = logoDims(170, 62); drawImg(hd.logo, (W - d.lw) / 2, y, d.lw, d.lh); y -= d.lh + 8; }
-    (hd.name ? wrapLines(hd.name, 18, true, CW) : []).forEach((ln) => { text(ln, (W - tw(ln, 18, true)) / 2, y - 16, 18, true, INK); y -= 22; });
-    (hd.lines || []).forEach((l) => wrapLines(l, 8.5, false, CW).forEach((ln) => { text(ln, (W - tw(ln, 8.5, false)) / 2, y - 9, 8.5, false, GREY); y -= 11; }));
-    y -= 8; rect(M + CW * 0.3, y, CW * 0.4, 1.4, AC); y -= 20;
-    if (hd.label) { text(hd.label, (W - tw(hd.label, lsz, true)) / 2, y - 12, lsz, true, AC); y -= 26; }
-    const ms = (hd.meta || []).map(([k, v]) => `${k} ${v}`).join('   ·   ');
-    wrapLines(ms, 9, false, CW).forEach((ln) => { text(ln, (W - tw(ln, 9, false)) / 2, y - 8, 9, false, INK); y -= 12; });
-    y -= 4; hline(y, LINE); y -= 16;
+    y = Math.min(ly, ry) - 6; rect(M, y, CW, 2, AC); y -= 16;
+  } else if (th.t === 'bold') {
+    // título enorme a la izquierda, logo a la derecha; debajo, datos de la compañía (izq.) y del documento (der.)
+    const d = hd.logo ? logoDims(130, 58) : null, LS = 30;
+    if (hd.label) text(hd.label, M, y - 26, LS, true, AC);
+    if (d) drawImg(hd.logo, W - M - d.lw, y, d.lw, d.lh);
+    y -= Math.max(hd.label ? 34 : 0, d ? d.lh : 0) + 6; rect(M, y, CW, 2.5, AC); y -= 14;
+    const rightW = Math.max(60, ...(hd.meta || []).map(([k, v]) => tw(`${k}  ${v}`, 9, false))) + 10, leftMax = CW - rightW - 16;
+    let ly = y;
+    if (hd.name) wrapLines(hd.name, 13, true, leftMax).forEach((ln) => { text(ln, M, ly - 10, 13, true, INK); ly -= 16; });
+    (hd.lines || []).forEach((t) => wrapLines(t, 8.5, false, leftMax).forEach((ln) => { text(ln, M, ly - 8, 8.5, false, GREY); ly -= 11; }));
+    let ry = y;
+    (hd.meta || []).forEach(([k, v]) => { const s2 = `${k}  ${v}`; text(s2, W - M - tw(s2, 9, false), ry - 9, 9, false, INK); ry -= 12; });
+    y = Math.min(ly, ry) - 6; hline(y, LINE); y -= 14;
   } else {
     // Logo a la izquierda; datos de la compañía pegados a su derecha, alineados con la BASE del logo; título y datos del documento arriba a la derecha.
     const metaTxt = (hd.meta || []).map(([k, v]) => `${k}  ${v}`);
     const rightW = Math.max(hd.label ? tw(hd.label, 20, true) : 0, ...metaTxt.map((s) => tw(s, 9, false))) + 22;
     const rightH = (hd.label ? 26 : 8) + metaTxt.length * 12;
+    const frameIdx = ops.length, topY = y;
     let d = null, nameL = [], infoL = [], th_ = 0, textX = M, avail = CW;
     for (const sc of hd.logo ? [1, 0.9, 0.8, 0.7] : [1]) {
       d = hd.logo ? logoDims(150 * sc, 62 * sc) : null;
@@ -485,7 +558,11 @@ function buildPdf(title, lines, opts = {}) {
     if (hd.label) { text(hd.label, W - M - tw(hd.label, 20, true), ry, 20, true, AC); ry -= 20; }
     metaTxt.forEach((s) => { text(s, W - M - tw(s, 9, false), ry, 9, false, INK); ry -= 12; });
     y = Math.min(y - blockH, ry) - 8;
-    rect(M, y, CW, th.t === 'minimal' ? 1 : 3, AC); y -= 18;
+    if (th.t === 'frame') {
+      const x0 = M - 10, w0 = CW + 20, yb = y - 6, top = topY + 10;
+      ops.splice(frameIdx, 0, `${col(mixW(AC, 0.93))} rg ${x0.toFixed(1)} ${yb.toFixed(1)} ${w0.toFixed(1)} ${(top - yb).toFixed(1)} re f`, `${col(mixW(AC, 0.7))} RG 0.8 w ${x0.toFixed(1)} ${yb.toFixed(1)} ${w0.toFixed(1)} ${(top - yb).toFixed(1)} re S`, `${col(AC)} rg ${x0.toFixed(1)} ${yb.toFixed(1)} ${w0.toFixed(1)} 3 re f`);
+      y = yb - 14;
+    } else { rect(M, y, CW, th.t === 'side' ? 1.2 : 3, AC); y -= 18; }
   }
 
   // ----- contenido -----
@@ -577,6 +654,25 @@ function buildPdf(title, lines, opts = {}) {
       });
       y -= 8; continue;
     }
+    if (it.qr) {
+      const mx = qrMatrix(it.qr.url);
+      if (mx) {
+        const pad = 10, quiet = 2, cells = mx.length + 2 * quiet, side = 96, mod = side / cells, boxH = side + 2 * pad;
+        need(boxH);
+        rect(M, y - boxH, CW, boxH, it.qr.bg || [0.97, 0.98, 0.99], it.qr.border || [0.88, 0.9, 0.93]);
+        const qx = M + pad, qy = y - pad;
+        rect(qx, qy - side, side, side, [1, 1, 1]);
+        mx.forEach((row, r) => row.forEach((on, c) => { if (on) ops.push(`0 0 0 rg ${(qx + (c + quiet) * mod).toFixed(2)} ${(qy - (r + quiet + 1) * mod).toFixed(2)} ${(mod + 0.15).toFixed(2)} ${(mod + 0.15).toFixed(2)} re f`); }));
+        annots.push(`<< /Type /Annot /Subtype /Link /Rect [${qx.toFixed(1)} ${(qy - side).toFixed(1)} ${(qx + side).toFixed(1)} ${qy.toFixed(1)}] /Border [0 0 0] /A << /S /URI /URI (${pdfEsc(it.qr.url)}) >> >>`);
+        const tx = qx + side + 14, tW = W - M - pad - tx; let ty = qy - 4;
+        const blocks = [{ t: 'PAGUE CON EL CÓDIGO QR', size: 10.5, b: true }, { t: 'Escanéelo con la cámara de su teléfono, o desde una computadora abra el enlace:', size: 9, c: GREY }];
+        blocks.forEach((b2) => wrapLines(b2.t, b2.size, b2.b, tW).forEach((ln) => { text(ln, tx, ty - b2.size * 0.9, b2.size, b2.b, b2.c || INK); ty -= b2.size * 1.35; }));
+        ty -= 3;
+        wrapLines(it.qr.url, 7.5, false, tW).forEach((ln) => { const bw = tw(ln, 7.5, false); text(ln, tx, ty - 7.5 * 0.9, 7.5, false, it.qr.c || INK); annots.push(`<< /Type /Annot /Subtype /Link /Rect [${tx.toFixed(1)} ${(ty - 9).toFixed(1)} ${(tx + bw).toFixed(1)} ${(ty + 1).toFixed(1)}] /Border [0 0 0] /A << /S /URI /URI (${pdfEsc(it.qr.url)}) >> >>`); ty -= 7.5 * 1.3; });
+        y -= boxH + 6;
+      }
+      continue;
+    }
     if (it.imgRow) {
       const n = it.imgRow.length, gap = 12, w = (CW - gap * (n - 1)) / n, maxH = 200;
       const dims = it.imgRow.map((o) => { let ww = w, hh = (o.img.h / o.img.w) * ww; if (hh > maxH) { hh = maxH; ww = (o.img.w / o.img.h) * hh; } return { ww, hh }; });
@@ -664,17 +760,17 @@ function bizLines(b) {
 /* ---------- plantillas de factura / cotización ---------- */
 const DOC_TEMPLATES = [
   ['classic', 'Clásica', 'Línea de color arriba y barras de color. La de siempre.'],
-  ['modern', 'Moderna', 'Banda de color arriba con tu nombre en blanco.'],
-  ['minimal', 'Minimalista', 'Sin colores: blanco y negro con líneas finas. Ahorra tinta.'],
-  ['elegant', 'Elegante', 'Todo centrado: logo, nombre y datos al centro.'],
+  ['side', 'Franja lateral', 'Franja de color en el borde izquierdo de cada página y línea fina arriba.'],
+  ['frame', 'Recuadro', 'Encabezado dentro de un recuadro de color suave.'],
+  ['bold', 'Título grande', 'FACTURA en grande a la izquierda, logo a la derecha y datos en dos columnas.'],
 ];
 const ACCENTS = ['#0284c7', '#0d9488', '#16a34a', '#7c3aed', '#be123c', '#ea580c', '#0f172a'];
 const hexRgb = (h) => { const m = /^#?([0-9a-f]{6})$/i.exec(String(h || '').trim()); return m ? [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16) / 255) : null; };
 const mixW = (c, k) => c.map((v) => v + (1 - v) * k);
 function docTheme(cfg) {
   const o = cfg.invoice, t = DOC_TEMPLATES.some((x) => x[0] === o.template) ? o.template : 'classic';
-  const acc = t === 'minimal' ? [0.1, 0.1, 0.12] : hexRgb(o.accent) || ACC;
-  return { t, acc, flat: t === 'minimal', soft: t === 'minimal' ? [0.97, 0.97, 0.97] : mixW(acc, 0.93), edge: t === 'minimal' ? [0.82, 0.82, 0.84] : mixW(acc, 0.7) };
+  const acc = hexRgb(o.accent) || ACC;
+  return { t, acc, flat: false, soft: mixW(acc, 0.93), edge: mixW(acc, 0.7) };
 }
 function pdfHeader(cfg, key, label, meta) {
   const o = cfg[key];
@@ -801,6 +897,12 @@ function buildStopDoc(db, stopId, cfgIn) {
   };
 }
 
+const INV_LAYOUTS = [
+  ['twocol', 'Dos columnas', 'Cliente y detalles lado a lado, totales a la derecha, pago y condiciones juntos.'],
+  ['summary', 'Total arriba', 'Una barra con el total y la fecha de vencimiento justo debajo del encabezado.'],
+  ['plain', 'Limpia', 'Sin cajas de color: líneas finas y totales sencillos. Ahorra tinta.'],
+  ['side', 'Pago y totales', 'Datos de pago a la izquierda y totales a la derecha, al final.'],
+];
 function buildInvoiceDoc(client, inv, cfgIn, db) {
   const cfg = cfgIn || mergeSettings(null), o = cfg.invoice, th = docTheme(cfg);
   const today = todayISO(), st = effectiveStatus(inv, today), num = invNumber(inv, db);
@@ -809,7 +911,7 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
   text += inv.lines.map((l) => `• ${l.description}: ${money(l.amount)}`).join('\n');
   text += `\n\n*Total: ${money(inv.total_amount)}*${db && invPaid(inv, db) > 0 && inv.status !== 'PAID' ? `\nAbonos: -${money(invPaid(inv, db))}\n*Balance pendiente: ${money(invBalance(inv, db))}*` : ''}\n${paymentInstructions(inv.payment_method, cfg)}\n\n${o.footerText || ''}`;
 
-  const lay = ['standard', 'twocol', 'compact', 'recibo'].includes(o.layout) ? o.layout : 'standard', two = lay === 'twocol', cmp = lay === 'compact', rec = lay === 'recibo';
+  const lay = INV_LAYOUTS.some((x) => x[0] === o.layout) ? o.layout : 'twocol', two = true, cmp = false, rec = false, side = lay === 'side', plain = lay === 'plain', sum = lay === 'summary', flat = plain;
   const L = [];
   const cinfo = [client.phone && `Tel. ${client.phone}`, client.email, prop && `${prop.address}, ${prop.municipality}`].filter(Boolean);
   const tl = termsLabel(inv.terms), issueTxt = fmtDate(inv.issue_date || inv.created_at);
@@ -819,7 +921,8 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
   if (o.dates && tl) detRows.push({ t: `Condiciones: ${tl}`, size: 9.5 });
   detRows.push({ t: `Periodo: ${inv.period}`, size: 9.5, c: GREY }, { t: `Estado: ${STATUS_LABEL[st]}`, size: 9.5, c: GREY });
   const cliRows = [{ t: 'FACTURAR A', size: 8.5, b: true, c: GREY }, { t: client.name, size: 12, b: true }, ...cinfo.map((x) => ({ t: x, size: 9.5, c: GREY }))];
-  if (two) L.push({ cols2: [o.clientInfo ? cliRows : [{ t: ' ', size: 9.5 }], detRows], bg: th.soft, border: th.edge });
+  if (sum) L.push({ size: 14, pad: 9, bg: th.acc, c: [1, 1, 1], b: true, row: [{ t: `${inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR'}   ·   Vence ${fmtDate(inv.due_date)}`, w: 0.68 }, { t: money(inv.total_amount), w: 0.32, align: 'right' }] }, { space: 10 });
+  if (two) L.push({ cols2: [o.clientInfo ? cliRows : [{ t: ' ', size: 9.5 }], detRows], bg: plain ? [1, 1, 1] : th.soft, border: th.edge });
   else if (rec) { /* «Facturar a» va en el encabezado */ }
   else if (o.clientInfo && cmp) L.push({ t: `Cliente: ${client.name}${cinfo.length ? '  ·  ' + cinfo.join('  ·  ') : ''}`, size: 9.5, b: false }, { space: 6 });
   else if (o.clientInfo) { cliRows.forEach((r) => L.push(r)); L.push({ space: 10 }); }
@@ -829,7 +932,7 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
   if (o.itemType) head.push({ t: 'Tipo', w: cols[2] });
   head.push({ t: 'Monto', w: cols[3], align: 'right' });
   const fs = cmp ? 9 : 10, fp = cmp ? 3 : 6;
-  L.push(th.flat ? { size: 9, pad: cmp ? 3 : 5, b: true, c: INK, line: true, row: head } : { size: 9, pad: cmp ? 3 : 5, bg: th.acc, b: true, c: [1, 1, 1], row: head });
+  L.push(flat ? { size: 9, pad: cmp ? 3 : 5, b: true, c: INK, line: true, row: head } : { size: 9, pad: cmp ? 3 : 5, bg: th.acc, b: true, c: [1, 1, 1], row: head });
   inv.lines.forEach((l, i) => {
     const r = [{ t: String(i + 1), w: cols[0], c: GREY }, { t: l.description, w: cols[1] }];
     if (o.itemType) r.push({ t: KIND[l.kind] || l.kind, w: cols[2], c: GREY });
@@ -841,17 +944,17 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
   const KSUB = { FEE: 'Servicios', VISIT: 'Servicios', PART: 'Piezas', WORK_ORDER: 'Órdenes de trabajo', PREV: 'Saldo anterior', CREDIT: 'Crédito' };
   const paidSoFar = db ? invPaid(inv, db) : 0, balNow = db ? invBalance(inv, db) : inv.total_amount, showBal = paidSoFar > 0 && inv.status !== 'PAID';
   let recT = null;
-  if (rec) {
+  if (side) {
     recT = [];
     if (o.subtotals && kinds.length > 1) kinds.forEach((k) => recT.push({ l: KSUB[k], v: money(inv.lines.filter((x) => x.kind === k).reduce((s, x) => s + x.amount, 0)), size: 9.5, pad: 3 }));
     recT.push({ l: 'Total', v: money(inv.total_amount), size: 11, pad: 5, b: true, c: INK, line: true });
     const pd = inv.status === 'PAID' ? inv.total_amount : paidSoFar;
     if (pd > 0) recT.push({ l: inv.status === 'PAID' ? 'Pagada' : 'Abonado', v: '-' + money(pd), size: 10, pad: 4 });
-    recT.push({ l: 'SALDO PENDIENTE', v: money(balNow), size: 12, pad: 7, b: true, ...(th.flat ? { c: INK, line: true } : { bg: th.acc }) });
+    recT.push({ l: 'SALDO PENDIENTE', v: money(balNow), size: 12, pad: 7, b: true, ...(flat ? { c: INK, line: true } : { bg: th.acc }) });
   } else if (two || cmp) {
     const T = [];
     if (o.subtotals && kinds.length > 1) kinds.forEach((k) => T.push({ l: KSUB[k], v: money(inv.lines.filter((x) => x.kind === k).reduce((s, x) => s + x.amount, 0)), size: 9.5, pad: 2 }));
-    T.push(th.flat ? { l: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', v: money(inv.total_amount), size: 13, pad: 6, b: true, c: INK, line: true } : { l: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', v: money(inv.total_amount), size: 13, pad: 6, b: true, bg: th.acc });
+    T.push((flat || sum) ? { l: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', v: money(inv.total_amount), size: 13, pad: 6, b: true, c: INK, line: true } : { l: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', v: money(inv.total_amount), size: 13, pad: 6, b: true, bg: th.acc });
     if (showBal) T.push({ l: 'Abonos recibidos', v: '-' + money(paidSoFar), size: 10, pad: 3 }, { l: 'BALANCE PENDIENTE', v: money(balNow), size: 12, pad: 4, b: true, c: INK });
     L.push({ totals: T, w: 0.5 }, { space: 6 });
   } else {
@@ -862,10 +965,10 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
       });
       L.push({ space: 4 });
     }
-    L.push({ size: 13, pad: 7, ...(th.flat ? { c: INK, line: true } : { bg: th.acc, c: [1, 1, 1] }), b: true, row: [{ t: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', w: 0.7 }, { t: money(inv.total_amount), w: 0.3, align: 'right' }] }, { space: 12 });
+    L.push({ size: 13, pad: 7, ...((flat || sum) ? { c: INK, line: true } : { bg: th.acc, c: [1, 1, 1] }), b: true, row: [{ t: inv.status === 'PAID' ? 'TOTAL PAGADO' : 'TOTAL A PAGAR', w: 0.7 }, { t: money(inv.total_amount), w: 0.3, align: 'right' }] }, { space: 12 });
     if (showBal) L.push({ size: 10.5, pad: 3, row: [{ t: 'Abonos recibidos', w: 0.7, align: 'right', c: GREY }, { t: '-' + money(paidSoFar), w: 0.3, align: 'right' }] }, { size: 12, pad: 5, b: true, row: [{ t: 'BALANCE PENDIENTE', w: 0.7, align: 'right' }, { t: money(balNow), w: 0.3, align: 'right' }] }, { space: 8 });
   }
-  if (rec) {
+  if (side) {
     const rr = [];
     if (o.payBox) {
       rr.push({ t: PAYMENT_LABEL[inv.payment_method] || inv.payment_method, size: 11, b: true });
@@ -900,9 +1003,9 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
     const right = [{ t: 'CONDICIONES', size: 8.5, b: true, c: GREY }];
     if (tl) right.push({ t: tl, size: 11, b: true }, { t: `Vence: ${fmtDate(inv.due_date)}`, size: 9.5, c: GREY });
     if (termsBlock) right.push({ t: termsBlock, size: 9, c: GREY });
-    if (two && right.length > 1) L.push({ cols2: [rows, right], bg: th.soft, border: th.edge });
+    if (two && right.length > 1) L.push({ cols2: [rows, right], bg: plain ? [1, 1, 1] : th.soft, border: th.edge });
     else {
-      L.push({ panel: { rows, bg: th.soft, border: th.edge } });
+      L.push({ panel: { rows, bg: plain ? [1, 1, 1] : th.soft, border: th.edge } });
       if (termsBlock) L.push({ space: 4 }, { t: 'TÉRMINOS', size: 8.5, b: true, c: GREY }, { t: termsBlock, size: 9, c: GREY });
     }
   } else {
@@ -910,6 +1013,7 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
     if (termsBlock) L.push({ space: 4 }, { t: 'TÉRMINOS', size: 8.5, b: true, c: GREY }, { t: termsBlock, size: 9, c: GREY });
   }
   }
+  if (o.payBox && inv.payment_method === 'ATH_MOVIL' && inv.status !== 'PAID' && athUrl(cfg)) L.push({ qr: { url: athUrl(cfg), bg: plain ? [1, 1, 1] : th.soft, border: th.edge } });
 
   const meta = [];
   if (rec) {
@@ -1226,4 +1330,4 @@ async function processPhoto(file, kind, coords) {
   return { uri: cv.toDataURL('image/jpeg', 0.72), w, h };
 }
 
-if (typeof module !== 'undefined') module.exports = { buildReceiptDoc, TERMS, termsLabel, dueFor, PAY_METHODS, invPaid, invBalance, clientCredit, clientOwed, routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
+if (typeof module !== 'undefined') module.exports = { qrMatrix, buildReceiptDoc, TERMS, termsLabel, dueFor, PAY_METHODS, invPaid, invBalance, clientCredit, clientOwed, routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
