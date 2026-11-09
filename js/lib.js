@@ -873,7 +873,7 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
       else {
         if (inv.payment_method === 'ATH_MOVIL') {
           const link = athUrl(cfg), ph = (cfg.pay.athPhone || '').trim();
-          if (link) rr.push({ t: 'Pagar con ATH Móvil Business (toque el enlace):', size: 10, b: true }, { t: link, size: 10.5, b: true, c: th.acc, link });
+          if (link) rr.push({ t: 'Pagar con ATH Móvil Business:', size: 10, b: true }, { t: 'TOQUE AQUÍ PARA PAGAR AHORA', size: 11, b: true, c: th.acc, link });
           if (ph) rr.push({ t: `ATH Móvil Business: ${ph}`, size: link ? 10 : 12, b: true, c: link ? INK : th.acc });
         }
         if (inv.payment_method === 'ATH_PERSONAL' && (cfg.pay.athPersonalPhone || '').trim()) rr.push({ t: `ATH Móvil personal: ${cfg.pay.athPersonalPhone.trim()}`, size: 12, b: true, c: th.acc });
@@ -891,7 +891,7 @@ function buildInvoiceDoc(client, inv, cfgIn, db) {
     else {
       if (inv.payment_method === 'ATH_MOVIL') {
         const link = athUrl(cfg), ph = (cfg.pay.athPhone || '').trim();
-        if (link) rows.push({ t: 'Pagar con ATH Móvil Business (toque el enlace):', size: 10, b: true }, { t: link, size: 10.5, b: true, c: th.acc, link });
+        if (link) rows.push({ t: 'Pagar con ATH Móvil Business:', size: 10, b: true }, { t: 'TOQUE AQUÍ PARA PAGAR AHORA', size: 11, b: true, c: th.acc, link });
         if (ph) rows.push({ t: `ATH Móvil Business: ${ph}`, size: link ? 10 : 15, b: true, c: link ? INK : th.acc });
       }
       if (inv.payment_method === 'ATH_PERSONAL' && (cfg.pay.athPersonalPhone || '').trim()) rows.push({ t: `ATH Móvil personal: ${cfg.pay.athPersonalPhone.trim()}`, size: 15, b: true, c: th.acc });
