@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v37 · Plantillas nuevas, morosos y respaldo';
+const APP_VERSION = 'v38 · Propuestas comerciales';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -842,7 +842,7 @@ function pdfView() {
     <h2>📐 Distribución de la factura</h2><div class="card"><div class="tplgrid">${INV_LAYOUTS.map(([k, n, d]) => `<button class="tplc${(INV_LAYOUTS.some((x) => x[0] === st.invoice.layout) ? st.invoice.layout : 'twocol') === k ? ' on' : ''}" data-act="setLayout" data-v="${k}" style="--c:${esc(st.invoice.accent || '#0284c7')}">${layMini(k)}<b>${n}</b><span>${d}</span></button>`).join('')}</div>
     <div class="fld mt"><label>Condiciones de pago por defecto (se pueden cambiar en cada factura)</label><select data-setv="invoice.termsCode">${optList(TERMS, st.invoice.termsCode || 'NET15')}</select></div>${muted('«Vence a la entrega» = vence el mismo día que se emite. «Fin de mes» = último día del mes de emisión. Se muestra en la factura y en el mensaje.', 'mt-s')}</div>
     <h2>🧾 Recibo de pago</h2><div class="card">${tgl('receipt', [['ask', 'Ofrecer enviar un recibo al marcar pagada / registrar un pago']])}${fld('Mensaje al final del recibo', `<input data-setv="receipt.msg" value="${esc(st.receipt.msg)}">`)}${muted('Al registrar un pago se abre el envío con el recibo listo (PDF o texto, según la preferencia del cliente). Solo tocas Enviar. Si lo apagas, puedes enviarlo con el botón 🧾 de cada pago.', 'mt-s')}</div>
-    <h2>📝 Cotizaciones</h2><div class="card">${fld('Días de vigencia por defecto', `<input data-setv="quote.validDays" inputmode="numeric" value="${esc(st.quote.validDays)}">`)}${fld('Condiciones (salen al final del PDF)', `<textarea data-setv="quote.terms" style="min-height:70px">${esc(st.quote.terms)}</textarea>`)}${fld('Texto del pie', `<input data-setv="quote.footerText" value="${esc(st.quote.footerText)}">`)}<div class="chk"><span class="t">Línea de firma «Aceptada por»</span><label class="sw"><input type="checkbox" data-set="quote.accept"${st.quote.accept ? ' checked' : ''}><i></i></label></div></div>
+    <h2>📝 Cotizaciones</h2><div class="card">${fld('Días de vigencia por defecto', `<input data-setv="quote.validDays" inputmode="numeric" value="${esc(st.quote.validDays)}">`)}${fld('Condiciones (salen al final del PDF)', `<textarea data-setv="quote.terms" style="min-height:70px">${esc(st.quote.terms)}</textarea>`)}${fld('Por qué elegirnos (una razón por línea; revísalas: que sean ciertas para tu negocio)', `<textarea data-setv="quote.why" style="min-height:110px">${esc(st.quote.why)}</textarea>`)}${fld('Texto del pie', `<input data-setv="quote.footerText" value="${esc(st.quote.footerText)}">`)}<div class="chk"><span class="t">Línea de firma «Aceptada por»</span><label class="sw"><input type="checkbox" data-set="quote.accept"${st.quote.accept ? ' checked' : ''}><i></i></label></div></div>
     <h2>🧾 Factura — qué incluir</h2><div class="card">${tgl('auto', [['invoices', 'Crear solas las facturas de cuota mensual al empezar cada mes (quedan como borrador para que las revises y envíes)']])}${tgl('invoice', INV_OPTS)}
     ${fld('Términos', `<textarea data-setv="invoice.termsText" style="min-height:70px">${esc(st.invoice.termsText)}</textarea>`)}${fld('Texto del pie', `<input data-setv="invoice.footerText" value="${esc(st.invoice.footerText)}">`)}</div>
     <h2>📄 Informe de servicio — qué incluir</h2><div class="card">${tgl('report', REP_OPTS)}
@@ -886,10 +886,10 @@ function quoteView(id) {
   h += `<div class="mt"></div><div class="btns">${btn('✏️ Editar', 'editQuote', { id: q.id }, 'sm ghost')}${btn('⧉ Duplicar', 'dupQuote', { id: q.id }, 'sm ghost')}${btn('👁 PDF', 'previewQuote', { id: q.id }, 'sm ghost')}</div><div class="mt-s"></div>${btn('Eliminar cotización', 'delQuote', { id: q.id }, 'sm danger')}`;
   return { title: `Cotización ${q.number}`, body: h, footer: btn('📤 Enviar cotización', 'sendQuote', { id: q.id }) };
 }
-const qdNew = () => ({ id: null, mode: activeClients().length ? 'client' : 'prospect', client_id: '', prospect: { name: '', phone: '', email: '', address: '' }, lines: [{ description: '', qty: '1', price: '' }], discount: '', notes: '', valid_until: addDays(todayISO(), +S.settings.quote.validDays || 15) });
+const qdNew = () => ({ id: null, mode: activeClients().length ? 'client' : 'prospect', client_id: '', prospect: { name: '', phone: '', email: '', address: '' }, lines: [{ description: '', qty: '1', price: '' }], discount: '', notes: '', valid_until: addDays(todayISO(), +S.settings.quote.validDays || 15), tpl: 'blank', title: '', intro: '', scope: '', freq: '', chem: '', why: true });
 function openQuoteForm(id) {
   const q = id && find('quotes', id);
-  UI.qd = q ? { id: q.id, mode: q.client_id ? 'client' : 'prospect', client_id: q.client_id || '', prospect: { name: '', phone: '', email: '', address: '', ...(q.prospect || {}) }, lines: q.lines.map((l) => ({ description: l.description, qty: String(l.qty), price: String(l.price) })), discount: q.discount ? String(q.discount) : '', notes: q.notes || '', valid_until: q.valid_until } : qdNew();
+  UI.qd = q ? { id: q.id, mode: q.client_id ? 'client' : 'prospect', client_id: q.client_id || '', prospect: { name: '', phone: '', email: '', address: '', ...(q.prospect || {}) }, lines: q.lines.map((l) => ({ description: l.description, qty: String(l.qty), price: String(l.price) })), discount: q.discount ? String(q.discount) : '', notes: q.notes || '', valid_until: q.valid_until, tpl: 'edit', title: q.title || '', intro: q.intro || '', scope: q.scope || '', freq: q.freq || '', chem: q.chem || '', why: q.why !== false } : qdNew();
   openSheet(q ? 'Editar cotización' : 'Nueva cotización', '<div id="qbox"></div>');
   renderQ();
 }
@@ -900,7 +900,15 @@ function renderQ() {
   const pf = (k, l, ex = '') => `<div class="fld"><label>${l}</label><input data-qp="${k}" value="${esc(Q.prospect[k])}" ${ex}></div>`;
   b.innerHTML = `${seg(Q.mode, [['client', 'Cliente existente'], ['prospect', 'Prospecto nuevo']], 'qMode')}<div class="mt"></div>
     ${Q.mode === 'client' ? fld('Cliente', `<select id="q_client">${optList(act.map((c) => [c.id, c.name]), Q.client_id)}</select>`) : `${pf('name', 'Nombre *')}${pf('phone', 'Teléfono (WhatsApp)', 'type="tel"')}${pf('email', 'Email', 'type="email"')}${pf('address', 'Dirección del servicio')}`}
-    <h2>Servicios</h2>
+    <h2>Tipo de propuesta</h2>
+    ${Q.tpl === 'edit' ? '' : `${muted('Elige una plantilla y se llena sola: tú solo pones el cliente y los precios.')}<div class="chips mt-s">${Object.entries(QUOTE_TPLS).map(([k, t]) => chip(t.name, Q.tpl === k, 'qTpl', { k })).join('')}</div>`}
+    ${fld('Título de la propuesta', `<input data-qf="title" value="${esc(Q.title)}" placeholder="Ej. Propuesta de mantenimiento de piscina comercial">`)}
+    ${fld('Introducción (usa {cliente} para el nombre)', `<textarea data-qf="intro" style="min-height:80px">${esc(Q.intro)}</textarea>`)}
+    ${fld('Qué incluye (una cosa por línea)', `<textarea data-qf="scope" style="min-height:130px">${esc(Q.scope)}</textarea>`)}
+    ${fld('Frecuencia', `<input data-qf="freq" value="${esc(Q.freq)}" placeholder="Ej. 2 visitas por semana">`)}
+    <div class="fld"><label>Productos químicos</label><div class="chips">${[['', 'No mencionar'], ['incl', 'Incluidos en el precio'], ['extra', 'Se facturan aparte']].map(([v, l]) => chip(l, Q.chem === v, 'qChem', { v })).join('')}</div></div>
+    <div class="chk"><span class="t">Incluir «Por qué elegirnos» (se edita en Ajustes)</span><label class="sw"><input type="checkbox" data-qwhy="1"${Q.why ? ' checked' : ''}><i></i></label></div>
+    <h2>Servicios y precios</h2>
     ${S.settings.catalog.length ? `${muted('Toca para añadir del catálogo')}<div class="chips mt-s">${S.settings.catalog.map((x, i) => chip(`${x.name} · ${money(x.price)}`, false, 'qAddCat', { i })).join('')}</div>` : ''}
     ${Q.lines.map((l, i) => `<div class="card" style="padding:10px"><div class="fld" style="margin-bottom:8px"><label>Descripción</label><input data-ql="${i}:description" value="${esc(l.description)}" placeholder="Ej. Cambio de arena del filtro"></div>
       <div class="g2"><div class="fld" style="margin:0"><label>Cantidad</label><input data-ql="${i}:qty" inputmode="decimal" value="${esc(l.qty)}"></div><div class="fld" style="margin:0"><label>Precio ($)</label><input data-ql="${i}:price" inputmode="decimal" value="${esc(l.price)}"></div></div>
@@ -1098,6 +1106,13 @@ const A = {
   setLayout: (d) => { S.settings.invoice.layout = d.v; persist(); render(); },
   setTemplate: (d) => { S.settings.invoice.template = d.v; persist(); render(); },
   setAccent: (d) => { S.settings.invoice.accent = d.v; persist(); render(); },
+  qTpl: (d) => {
+    const Q = UI.qd, t = QUOTE_TPLS[d.k]; Q.tpl = d.k;
+    Q.title = t.title; Q.intro = t.intro; Q.scope = t.scope; Q.freq = t.freq;
+    if (d.k !== 'blank' || !Q.lines.some((l) => l.description.trim() || l.price)) Q.lines = (t.lines.length ? t.lines : [{ description: '', qty: '1', price: '' }]).map((l) => ({ ...l }));
+    renderQ();
+  },
+  qChem: (d) => { UI.qd.chem = d.v; renderQ(); },
   newQuote: () => openQuoteForm(), editQuote: (d) => openQuoteForm(d.id), openQuote: (d) => go('quote', d.id),
   qMode: (d) => { UI.qd.mode = d.v; renderQ(); },
   qAddLine: () => { UI.qd.lines.push({ description: '', qty: '1', price: '' }); renderQ(); },
@@ -1109,7 +1124,7 @@ const A = {
     if (Q.mode === 'client' && !Q.client_id) return toast('Elige un cliente');
     if (!lines.length) return toast('Agrega al menos un servicio con descripción');
     const old = Q.id && find('quotes', Q.id), pr = Q.prospect;
-    const q = { id: old ? old.id : uid('q'), number: old ? old.number : nextQuoteNumber(S.db), client_id: Q.mode === 'client' ? Q.client_id : null, prospect: Q.mode === 'prospect' ? { name: pr.name.trim(), phone: pr.phone.trim(), email: pr.email.trim(), address: pr.address.trim() } : null, lines, discount: toNum(Q.discount) || 0, notes: Q.notes.trim(), valid_until: Q.valid_until || addDays(todayISO(), 15), status: old ? old.status : 'DRAFT', created_at: old ? old.created_at : new Date().toISOString(), order_id: old ? old.order_id : null };
+    const q = { id: old ? old.id : uid('q'), number: old ? old.number : nextQuoteNumber(S.db), client_id: Q.mode === 'client' ? Q.client_id : null, prospect: Q.mode === 'prospect' ? { name: pr.name.trim(), phone: pr.phone.trim(), email: pr.email.trim(), address: pr.address.trim() } : null, lines, discount: toNum(Q.discount) || 0, notes: Q.notes.trim(), valid_until: Q.valid_until || addDays(todayISO(), 15), status: old ? old.status : 'DRAFT', created_at: old ? old.created_at : new Date().toISOString(), order_id: old ? old.order_id : null, title: Q.title.trim(), intro: Q.intro.trim(), scope: Q.scope.trim(), freq: Q.freq.trim(), chem: Q.chem, why: Q.why };
     upsert('quotes', q); closeSheet(); go('quote', q.id);
   },
   setQuoteStatus: (d) => upsert('quotes', { ...find('quotes', d.id), status: d.v }),
@@ -1491,6 +1506,7 @@ function onInput(e) {
     const o = document.getElementById('calc_out'); if (o) o.innerHTML = calcOutHtml();
   } else if (t.dataset.ql) { const [i, k] = t.dataset.ql.split(':'); UI.qd.lines[+i][k] = t.value; const e = document.getElementById('q_tot'); if (e) e.textContent = money(qdTotal()); }
   else if (t.dataset.qp) UI.qd.prospect[t.dataset.qp] = t.value;
+  else if (t.dataset.qf) UI.qd[t.dataset.qf] = t.value;
   else if (t.id === 'q_disc') { UI.qd.discount = t.value; const e = document.getElementById('q_tot'); if (e) e.textContent = money(qdTotal()); }
   else if (t.id === 'q_valid') UI.qd.valid_until = t.value;
   else if (t.id === 'q_notes') UI.qd.notes = t.value;
@@ -1506,6 +1522,7 @@ function onInput(e) {
 }
 async function onChange(e) {
   const t = e.target;
+  if (t.dataset.qwhy) { UI.qd.why = t.checked; return; }
   if (t.dataset.chk) { // checklist de parada u orden
     const tbl = t.dataset.chk === 'stop' ? 'stops' : 'workOrders', row = find(tbl, t.dataset.owner);
     upsert(tbl, { ...row, checklist: row.checklist.map((c) => (c.id === t.dataset.id ? { ...c, done: t.checked } : c)) });

@@ -288,7 +288,8 @@ const DEFAULT_SETTINGS = {
     termsText: 'Gracias por su preferencia.',
     footerText: 'Gracias por confiar en Elite Pool Service PR',
   },
-  quote: { validDays: 15, accept: true, terms: 'Cotización sujeta a cambios si las condiciones de la piscina o los equipos son diferentes a lo inspeccionado.', footerText: 'Gracias por su interés en Elite Pool Service PR' },
+  quote: { validDays: 15, accept: true, terms: 'Cotización sujeta a cambios si las condiciones de la piscina o los equipos son diferentes a lo inspeccionado.', footerText: 'Gracias por su interés en Elite Pool Service PR',
+    why: 'Reporte de cada visita con lecturas del agua, enviado a su teléfono\nRegistro documentado de cloro, pH y alcalinidad en cada servicio\nRuta y horario fijos: servicio constante, semana tras semana\nAtención rápida ante cualquier problema con el agua o los equipos\nPrecios claros por escrito, sin sorpresas' },
   catalog: [],
   chem: { ...DEFAULT_CHEM },
   targets: { ...DEFAULT_TARGETS },
@@ -1096,9 +1097,36 @@ function quoteWho(q, db) {
   const pr = q.prospect || {};
   return { name: pr.name || 'Cliente', phone: pr.phone || '', email: pr.email || '', address: pr.address || '', client: null };
 }
+/** Plantillas de propuesta: rellenan la cotización; luego solo cambias nombre, dirección y precio. */
+const QUOTE_TPLS = {
+  blank: { name: 'En blanco', title: '', intro: '', scope: '', freq: '', lines: [] },
+  commercial: {
+    name: 'Mantenimiento de piscina comercial', title: 'Propuesta de mantenimiento de piscina comercial',
+    intro: 'Gracias por la oportunidad de presentarle nuestra propuesta para {cliente}. Nuestro objetivo es mantener su piscina limpia, segura y lista para sus usuarios, con un servicio constante y un registro claro de cada visita.',
+    scope: 'Cepillado de paredes y piso, aspirado y limpieza de skimmers y cestas\nRetiro de hojas y residuos de la superficie\nMedición y ajuste de cloro, pH, alcalinidad y estabilizador en cada visita\nLimpieza del filtro y revisión de bomba, motor y presión\nRegistro escrito de las lecturas de cada visita\nReporte al administrador después de cada servicio',
+    freq: '2 visitas por semana', lines: [{ description: 'Mantenimiento mensual de piscina comercial', qty: '1', price: '' }],
+  },
+  startup: {
+    name: 'Limpieza y recuperación inicial', title: 'Propuesta de limpieza y recuperación de piscina',
+    intro: 'Gracias por contactarnos. Para {cliente} proponemos una limpieza profunda inicial que deje el agua en condiciones, y después un plan de mantenimiento para que no vuelva a descontrolarse.',
+    scope: 'Inspección inicial de la piscina, filtro y equipos\nLimpieza profunda: cepillado, aspirado y retiro de residuos\nTratamiento del agua hasta llevarla a parámetros balanceados\nLimpieza o contralavado del filtro\nInforme de lo encontrado y recomendaciones',
+    freq: 'Servicio único, con seguimiento hasta dejar el agua balanceada', lines: [{ description: 'Limpieza y recuperación inicial', qty: '1', price: '' }, { description: 'Mantenimiento mensual (después de la recuperación)', qty: '1', price: '' }],
+  },
+  repair: {
+    name: 'Reparación o mejora de equipo', title: 'Propuesta de reparación de equipo',
+    intro: 'Tras revisar la piscina de {cliente}, le presentamos el detalle del trabajo recomendado y su costo.',
+    scope: 'Diagnóstico del problema encontrado\nSuministro e instalación de las piezas indicadas\nPruebas de funcionamiento al terminar\nLimpieza del área de trabajo',
+    freq: 'Trabajo único, coordinado con usted', lines: [{ description: 'Mano de obra', qty: '1', price: '' }, { description: 'Materiales / piezas', qty: '1', price: '' }],
+  },
+};
+const QUOTE_CHEM = { incl: 'Productos químicos de rutina: incluidos en el precio', extra: 'Productos químicos: se facturan aparte, al costo, con detalle' };
+const quoteScope = (q) => [...String(q.scope || '').split('\n').map((x) => x.trim()).filter(Boolean), ...(QUOTE_CHEM[q.chem] ? [QUOTE_CHEM[q.chem]] : [])];
 function buildQuoteDoc(q, cfgIn, db) {
   const cfg = cfgIn || mergeSettings(null), th = docTheme(cfg), qs = cfg.quote, w = quoteWho(q, db), t = quoteTotals(q), st = quoteStatus(q);
-  let text = `📝 *${cfg.biz.name}* — Cotización N° ${q.number}\nPara: ${w.name}\nFecha: ${fmtDate(q.created_at)}\nVálida hasta: ${fmtDate(q.valid_until)}\n\n`;
+  const fill = (x) => String(x || '').replace(/\{cliente\}/g, w.name), scope = quoteScope(q), why = (qs.why || '').split('\n').map((x) => x.trim()).filter(Boolean);
+  let text = `📝 *${cfg.biz.name}* — ${q.title ? fill(q.title) : 'Cotización'} N° ${q.number}\nPara: ${w.name}\nFecha: ${fmtDate(q.created_at)}\nVálida hasta: ${fmtDate(q.valid_until)}\n\n`;
+  if (q.intro) text += `${fill(q.intro)}\n\n`;
+  if (scope.length) text += `*Qué incluye:*\n${scope.map((x) => '• ' + x).join('\n')}\n${q.freq ? 'Frecuencia: ' + q.freq + '\n' : ''}\n`;
   text += q.lines.map((l) => `• ${l.description}${+l.qty !== 1 ? ` (${l.qty} × ${money(l.price)})` : ''}: ${money((+l.qty || 0) * (+l.price || 0))}`).join('\n');
   if (t.disc > 0) text += `\n\nSubtotal: ${money(t.sub)}\nDescuento: -${money(t.disc)}`;
   text += `\n\n*Total: ${money(t.total)}*`;
@@ -1107,6 +1135,14 @@ function buildQuoteDoc(q, cfgIn, db) {
   const L = [{ t: 'PREPARADA PARA', size: 8.5, b: true, c: GREY }, { t: w.name, size: 12, b: true }];
   [w.phone && `Tel. ${w.phone}`, w.email, w.address].filter(Boolean).forEach((x) => L.push({ t: x, size: 9.5, c: GREY }));
   L.push({ space: 10 });
+  if (q.title) L.push({ t: fill(q.title), size: 16, b: true, c: th.acc }, { space: 6 });
+  if (q.intro) L.push({ t: fill(q.intro), size: 10.5 }, { space: 8 });
+  if (scope.length) {
+    L.push({ t: 'QUÉ INCLUYE', size: 8.5, b: true, c: GREY }, { space: 2 });
+    scope.forEach((x) => L.push({ t: '•  ' + x, size: 10, pad: 1 }));
+    if (q.freq) L.push({ space: 4 }, { t: `Frecuencia: ${q.freq}`, size: 10, b: true });
+    L.push({ space: 10 });
+  }
   const cols = [0.06, 0.46, 0.1, 0.18, 0.2];
   L.push(th.flat ? { size: 9, pad: 5, b: true, c: INK, line: true, row: [{ t: '#', w: cols[0] }, { t: 'Descripción', w: cols[1] }, { t: 'Cant.', w: cols[2], align: 'right' }, { t: 'Precio', w: cols[3], align: 'right' }, { t: 'Importe', w: cols[4], align: 'right' }] }
     : { size: 9, pad: 5, bg: th.acc, b: true, c: [1, 1, 1], row: [{ t: '#', w: cols[0] }, { t: 'Descripción', w: cols[1] }, { t: 'Cant.', w: cols[2], align: 'right' }, { t: 'Precio', w: cols[3], align: 'right' }, { t: 'Importe', w: cols[4], align: 'right' }] });
@@ -1116,11 +1152,12 @@ function buildQuoteDoc(q, cfgIn, db) {
   L.push({ size: 13, pad: 7, ...(th.flat ? { c: INK, line: true } : { bg: th.acc, c: [1, 1, 1] }), b: true, row: [{ t: 'TOTAL', w: 0.7 }, { t: money(t.total), w: 0.3, align: 'right' }] }, { space: 12 });
   L.push({ panel: { rows: [{ t: 'VIGENCIA', size: 8.5, b: true, c: GREY }, { t: `Válida hasta el ${fmtDate(q.valid_until)}`, size: 12, b: true, c: th.acc }], bg: th.soft, border: th.edge } });
   if (q.notes && q.notes.trim()) L.push({ space: 4 }, { t: 'NOTAS', size: 8.5, b: true, c: GREY }, { t: q.notes.trim(), size: 10 });
+  if (q.why !== false && why.length && (q.title || scope.length)) { L.push({ space: 8 }, { t: 'POR QUÉ ELEGIRNOS', size: 8.5, b: true, c: GREY }, { space: 2 }); why.forEach((x) => L.push({ t: '•  ' + x, size: 10, pad: 1 })); }
   if (qs.terms && qs.terms.trim()) L.push({ space: 6 }, { t: 'CONDICIONES', size: 8.5, b: true, c: GREY }, { t: qs.terms.trim(), size: 9, c: GREY });
   if (qs.accept) L.push({ space: 26 }, { t: 'Aceptada por: ______________________________     Fecha: ________________', size: 10 });
   const meta = [['N°', q.number], ['Fecha', fmtDate(q.created_at)], ['Vigencia', fmtDate(q.valid_until)], ['Estado', QUOTE_LABEL[st]]];
   return {
-    title: `Cotización ${q.number} — ${cfg.biz.name}`, text, lines: L,
+    title: `${q.title ? fill(q.title) : 'Cotización ' + q.number} — ${cfg.biz.name}`, text, lines: L,
     fileName: `cotizacion-${q.number}-${w.name.replace(/\W+/g, '-')}.pdf`,
     opts: { header: pdfHeader(cfg, 'invoice', 'COTIZACIÓN', meta), footer: qs.footerText || '', theme: th },
   };
@@ -1330,4 +1367,4 @@ async function processPhoto(file, kind, coords) {
   return { uri: cv.toDataURL('image/jpeg', 0.72), w, h };
 }
 
-if (typeof module !== 'undefined') module.exports = { qrMatrix, buildReceiptDoc, TERMS, termsLabel, dueFor, PAY_METHODS, invPaid, invBalance, clientCredit, clientOwed, routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
+if (typeof module !== 'undefined') module.exports = { QUOTE_TPLS, quoteScope, qrMatrix, buildReceiptDoc, TERMS, termsLabel, dueFor, PAY_METHODS, invPaid, invBalance, clientCredit, clientOwed, routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
