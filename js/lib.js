@@ -350,10 +350,128 @@ async function processLogo(file) {
 }
 
 /** Foto de referencia de una propiedad (sin sello): máx. 1000px, JPEG. */
-async function processRef(file) {
+/* ---------- Gastos: lectura de recibos, clasificación y resumen ---------- */
+const EXP_CATS = ['Químicos', 'Equipos', 'Piezas', 'Herramientas', 'Combustible', 'Otros'];
+const EXP_TYPES = {
+  Químicos: ['Cloro', 'Algicida', 'pH / Ácido', 'Alcalinidad', 'Estabilizador', 'Sal', 'Clarificador', 'Otro químico'],
+  Equipos: ['Bomba / motor', 'Calentador', 'Filtro / arena / cartucho', 'Luces', 'Celda de sal / clorinador', 'Robot limpiafondos', 'Otro equipo'],
+  Piezas: ['Pieza / plomería'],
+  Herramientas: ['Herramienta / prueba de agua'],
+  Combustible: ['Combustible'],
+  Otros: ['Sin clasificar'],
+};
+const EXP_TYPE_CAT = {}; EXP_CATS.forEach((c) => EXP_TYPES[c].forEach((t) => { EXP_TYPE_CAT[t] = c; }));
+const noAcc = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+const EXP_RULES = [
+  ['Algicida', /alguic|algic|algaec|\balgae|\balga\b/],
+  ['Estabilizador', /estabiliz|stabiliz|cyanuric|cianur|\bcya\b|conditioner|acondicionador/],
+  ['Alcalinidad', /alcalin|alkalin|bicarb|baking soda|\balk\b/],
+  ['pH / Ácido', /muriat|\bacido\b|\bacid\b|\bph\b|ph[- ](minus|plus|down|up)|bisulfat|soda ash|\bph-/],
+  ['Clarificador', /clarific|floculan|flocculant|clarifier|clearer/],
+  ['Cloro', /clor(o|\b)|chlor|hipoclor|hypochlor|\bshock\b|\btabs?\b|tableta|pastilla|trichlor/],
+  ['Sal', /\bsal\b|\bsalt\b/],
+  ['Otro químico', /quimic|chemical|calcium|dureza|calcio|fosfat|phosphat|enzim|enzym|stain|mancha|descalcific/],
+  ['Celda de sal / clorinador', /\bcelda\b|salt cell|intellichlor|aquarite|clorinador|chlorinator|\bcell\b/],
+  ['Robot limpiafondos', /robot|dolphin|polaris/],
+  ['Calentador', /calentador|heater|heat pump|bomba de calor/],
+  ['Bomba / motor', /\bbomba\b|\bpump\b|\bmotor\b|intelliflo|superflo|whisperflo/],
+  ['Filtro / arena / cartucho', /filtro|filter|cartucho|cartridge|\barena\b|\bsand\b/],
+  ['Luces', /\bluz\b|\bluces\b|\blight\b|\bled\b|transformador/],
+  ['Otro equipo', /timer|valvula|valve|controlador|manometro|gauge|automat/],
+  ['Pieza / plomería', /\bpvc\b|codo|elbow|\bunion\b|\btee\b|coupling|o-?ring|empaque|gasket|\bsello\b|\bseal\b|\btubo\b|\bpipe\b|pegamento|cement|primer|teflon|\bcinta\b|\btape\b|tornillo|screw|conector|adapt|skimmer|basket|canasta|\btapa\b|\blid\b|impulsor|impeller|difusor|diffuser|manguera|\bhose\b|clamp|abrazadera|fitting/],
+  ['Herramienta / prueba de agua', /cepillo|brush|\bposte\b|\bpole\b|\bnet\b|aspiradora|vacuum|test kit|kit de prueba|reactivo|reagent|\bstrips?\b|\btiras?\b|guante|glove|cubeta|bucket|esponja|sponge|goggles|gafas/],
+  ['Combustible', /gasolina|gasoline|unleaded|diesel|fuel|\bgas\b|premium|\bregular\b/],
+];
+/** Adivina categoría y tipo de un renglón del recibo. */
+function classifyItem(desc) {
+  const d = noAcc(desc);
+  for (const [type, re] of EXP_RULES) if (re.test(d)) return { type, cat: EXP_TYPE_CAT[type] };
+  return { type: 'Sin clasificar', cat: 'Otros' };
+}
+/** Tamaño que aparece en el nombre (25LB, 1 GAL…): { n, unit } o null. */
+function itemSize(desc) {
+  const m = String(desc || '').match(/(\d+(?:[.,]\d+)?)\s*[- ]?\s*(lbs?|libras?|galones?|gallon|gal|gl|oz|qt|kg|litros?|lt)\b/i);
+  if (!m) return null;
+  const u = m[2].toLowerCase(); const unit = /^(lb|libra)/.test(u) ? 'lb' : /^(gal|gl)/.test(u) ? 'gal' : u === 'oz' ? 'oz' : u === 'qt' ? 'qt' : u === 'kg' ? 'kg' : 'L';
+  return { n: parseFloat(m[1].replace(',', '.')), unit };
+}
+const MONTHS_ES = { ene: 1, feb: 2, mar: 3, abr: 4, may: 5, jun: 6, jul: 7, ago: 8, sep: 9, set: 9, oct: 10, nov: 11, dic: 12, jan: 1, apr: 4, aug: 8, dec: 12 };
+function parseMoney(s) {
+  s = String(s).replace(/[^\d.,\-]/g, ''); if (!s) return NaN;
+  const lc = s.lastIndexOf(','), ld = s.lastIndexOf('.');
+  if (lc > -1 && ld > -1) s = lc > ld ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '');
+  else if (lc > -1) s = /,\d{2}$/.test(s) ? s.replace(',', '.') : s.replace(/,/g, '');
+  return parseFloat(s);
+}
+const PRICE_END = /(-?\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|-?\d+[.,]\d{2})\s*-?\s*[A-Za-z]?\s*$/;
+const PRICE_ANY = /-?\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|-?\d+[.,]\d{2}/g;
+const VENDORS = [[/home\s*depot/, 'Home Depot'], [/wal-?mart/, 'Walmart'], [/costco/, 'Costco'], [/sam'?s/, "Sam's Club"], [/leslie/, "Leslie's Pool Supplies"], [/pool\s*supp/, 'Pool Supply'], [/ace\s*hard/, 'Ace Hardware'], [/sherwin/, 'Sherwin-Williams'], [/kmart/, 'Kmart'], [/puma/, 'Puma'], [/shell/, 'Shell'], [/texaco/, 'Texaco'], [/gulf/, 'Gulf'], [/total\s*energ/, 'TotalEnergies'], [/lowe'?s/, "Lowe's"], [/amazon/, 'Amazon']];
+/** Lee el texto OCR de un recibo: comercio, fecha, renglones, subtotal, IVU y total. */
+function parseReceipt(text) {
+  const lines = String(text || '').split(/\r?\n/).map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const out = { vendor: '', date: '', items: [], subtotal: null, tax: null, total: null, method: '' };
+  const full = noAcc(lines.join('\n'));
+  for (const [re, name] of VENDORS) if (re.test(full)) { out.vendor = name; break; }
+  if (!out.vendor) { const v = lines.slice(0, 6).find((l) => (l.match(/[A-Za-zÁÉÍÓÚáéíóúÑñ]/g) || []).length >= 3 && !/^(factura|recibo|receipt|invoice|welcome|bienvenid|gracias|tel|www)/i.test(l) && !/\d{3}[-. ]\d{4}/.test(l)); if (v) out.vendor = v.replace(/[^\wÁÉÍÓÚáéíóúÑñ&'.,\- ]/g, '').trim(); }
+  for (const l of lines) {
+    let m = l.match(/(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/);
+    if (m) { out.date = `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`; break; }
+    m = l.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4}|\d{2})\b/);
+    if (m) { let a = +m[1], b = +m[2], y = +m[3]; if (y < 100) y += 2000; const mo = a > 12 ? b : a, dd = a > 12 ? a : b; if (mo >= 1 && mo <= 12 && dd >= 1 && dd <= 31) { out.date = `${y}-${String(mo).padStart(2, '0')}-${String(dd).padStart(2, '0')}`; break; } }
+    m = noAcc(l).match(/(\d{1,2})[\s\-\/.]*(ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic|jan|apr|aug|dec)\w*[\s\-\/.,]*(\d{4})/);
+    if (m) { out.date = `${m[3]}-${String(MONTHS_ES[m[2]]).padStart(2, '0')}-${m[1].padStart(2, '0')}`; break; }
+  }
+  let taxSum = 0, taxSeen = false, prev = null;
+  const SKIP = /^(tel|phone|fecha|date|hora|time|cajer|cashier|caja\b|reg\b|ref\b|factura|invoice|recibo|orden|order|gracias|thank|vuelva|www|tienda|store|sucursal|ticket|no\.|#|aprob|auth|trans|lote|batch|card|tarjeta|cuenta|nombre|cliente|ahorro|puntos|points|saldo|balance)/i;
+  for (const l of lines) {
+    const n = noAcc(l);
+    if (/^\s*(\d+)\s*[@x]\s*\$?\s*(\d+[.,]\d{2})\s*(\w+)?\s*$/i.test(l) && prev) { const q = +l.match(/^\s*(\d+)/)[1]; if (q > 1) prev.qty = q; continue; }
+    if (/sub\s*-?\s*total/.test(n)) { const p = l.match(PRICE_ANY); if (p) out.subtotal = parseMoney(p[p.length - 1]); continue; }
+    if (/\b(i\.?\s?v\.?\s?u\.?|impuesto|sales tax|\btax\b|\biva\b)/.test(n)) { const p = l.match(PRICE_ANY); if (p) { taxSum += parseMoney(p[p.length - 1]); taxSeen = true; } continue; }
+    if (/\btotal\b|amount due|balance due|a pagar|importe total/.test(n) && !/subtotal/.test(n)) { const p = l.match(PRICE_ANY); if (p) { out.total = parseMoney(p[p.length - 1]); } continue; }
+    if (/efectivo|\bcash\b|visa|master ?card|amex|debit|debito|credit|credito|\bath\b|cheque|change|cambio|tendered|recibido|tarjeta/.test(n)) {
+      if (!out.method) out.method = /\bath\b/.test(n) ? 'ATH_MOVIL' : /visa|master|amex|debit|debito|credit|credito|tarjeta/.test(n) ? 'TARJETA' : /efectivo|\bcash\b/.test(n) ? 'EFECTIVO' : /cheque/.test(n) ? 'CHEQUE' : '';
+      continue;
+    }
+    if (SKIP.test(l)) continue;
+    const pm = l.match(PRICE_END); if (!pm) continue;
+    const amount = parseMoney(pm[1]); if (isNaN(amount)) continue;
+    let desc = l.slice(0, pm.index).trim(), qty = 1;
+    const allp = desc.match(PRICE_ANY);
+    if (allp) { const unit = parseMoney(allp[allp.length - 1]); desc = desc.replace(PRICE_ANY, ' ').trim().replace(/\s+(\d{1,2}\s*[xX@]?|[xX@])$/, ''); if (unit > 0 && Math.abs(unit * Math.round(amount / unit) - amount) < 0.011 && Math.round(amount / unit) > 1) qty = Math.round(amount / unit); }
+    const qm = desc.match(/^(\d{1,2})\s*[xX@]\s+/); if (qm) { qty = +qm[1]; desc = desc.slice(qm[0].length); }
+    desc = desc.replace(/[|_~]+/g, ' ').replace(/\s+/g, ' ').replace(/^[\d\s\-.#]{1,14}(?=[A-Za-z])/, (x) => (/^\d{6,}/.test(x.trim()) ? '' : x)).trim();
+    if ((desc.match(/[A-Za-zÁÉÍÓÚáéíóúÑñ]/g) || []).length < 3) continue;
+    const c = classifyItem(desc), it = { desc, qty, amount, cat: c.cat, type: c.type };
+    out.items.push(it); prev = it;
+  }
+  if (taxSeen) out.tax = Math.round(taxSum * 100) / 100;
+  return out;
+}
+const r2x = (n) => Math.round((+n || 0) * 100) / 100;
+const expItemsSum = (e) => r2x((e.items || []).reduce((s, i) => s + (+i.amount || 0), 0));
+/** Resumen de gastos entre dos fechas ISO (inclusive). */
+function expenseSummary(db, from, to) {
+  const list = (db.expenses || []).filter((e) => e.date >= from && e.date <= to);
+  const byType = {}, byCat = {};
+  let total = 0, tax = 0;
+  list.forEach((e) => {
+    total += +e.total || 0; tax += +e.tax || 0;
+    (e.items || []).forEach((i) => {
+      const t = i.type || 'Sin clasificar', cat = i.cat || EXP_TYPE_CAT[t] || 'Otros', q = +i.qty || 1, amt = +i.amount || 0, sz = itemSize(i.desc);
+      const b = (byType[t] ||= { type: t, cat, units: 0, amount: 0, measure: {}, receipts: new Set() });
+      b.units += q; b.amount += amt; b.receipts.add(e.id); if (sz) b.measure[sz.unit] = (b.measure[sz.unit] || 0) + sz.n * q;
+      byCat[cat] = (byCat[cat] || 0) + amt;
+    });
+  });
+  const types = Object.values(byType).map((b) => ({ ...b, amount: r2x(b.amount), receipts: b.receipts.size })).sort((a, b) => b.amount - a.amount);
+  return { list, total: r2x(total), tax: r2x(tax), types, cats: Object.entries(byCat).map(([cat, amount]) => ({ cat, amount: r2x(amount) })).sort((a, b) => b.amount - a.amount) };
+}
+const measureLabel = (m) => Object.entries(m || {}).map(([u, n]) => `${Math.round(n * 100) / 100} ${u}`).join(' + ');
+async function processRef(file, maxDim = 1000) {
   let bmp;
   try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch (e) { bmp = await createImageBitmap(file); }
-  const sc = Math.min(1, 1000 / Math.max(bmp.width, bmp.height));
+  const sc = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
   const w = Math.max(1, Math.round(bmp.width * sc)), h = Math.max(1, Math.round(bmp.height * sc));
   const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
   cv.getContext('2d').drawImage(bmp, 0, 0, w, h);
@@ -1310,6 +1428,11 @@ function backupSheets(db) {
   db.properties.forEach((p) => props.push([cname(p.client_id), p.address, p.municipality, (p.service_days || []).map((d) => DN[d]).join(', '), (p.dates || []).map((x) => x.d + (x.t ? ' ' + x.t : '')).join('; '), p.gate_code || '', p.access_notes || '', p.lat ?? '', p.lng ?? '', db.waterBodies.filter((w) => w.property_id === p.id).map((w) => `${w.name} (${w.gallons} gal)`).join('; '), p.fee != null && p.fee !== '' ? +p.fee : '']));
   const facturas = [['Número', 'Cliente', 'Período', 'Vence', 'Total', 'Estado', 'Método de pago']];
   db.invoices.forEach((i) => facturas.push([invNumber(i, db), cname(i.client_id), i.period, i.due_date, +i.total_amount || 0, STATUS_LABEL[effectiveStatus(i, todayISO())] || i.status, PAYMENT_LABEL[i.payment_method] || i.payment_method]));
+  const gastos = [['Fecha', 'Comercio', 'Subtotal', 'IVU', 'Total', 'Método', 'Cliente', 'Nota']], compras = [['Fecha', 'Comercio', 'Producto', 'Cant.', 'Monto', 'Categoría', 'Tipo', 'Tamaño']];
+  (db.expenses || []).slice().sort((x, y) => (y.date || '').localeCompare(x.date || '')).forEach((e) => {
+    gastos.push([e.date, e.vendor, +e.subtotal || 0, +e.tax || 0, +e.total || 0, PAY_METHODS[e.method] || e.method || '', cname(e.client_id), e.note || '']);
+    (e.items || []).forEach((i) => { const z = itemSize(i.desc); compras.push([e.date, e.vendor, i.desc, +i.qty || 1, +i.amount || 0, i.cat, i.type, z ? `${z.n} ${z.unit}` : '']); });
+  });
   const pagos = [['Fecha', 'Cliente', 'Monto', 'Método', 'Tipo', 'Factura', 'Nota']];
   (db.payments || []).forEach((p) => pagos.push([p.date, cname(p.client_id), +p.amount || 0, PAY_METHODS[p.method] || p.method, p.invoice_id ? 'Pago de factura' : 'Pago adelantado', (() => { const i = db.invoices.find((x) => x.id === p.invoice_id); return i ? invNumber(i, db) : ''; })(), p.note || '']));
   const lecturas = [['Fecha', 'Cliente', 'Cuerpo de agua', 'Cloro libre', 'pH', 'Alcalinidad', 'Ác. cianúrico', 'Sal', 'Dureza de calcio']];
@@ -1319,7 +1442,7 @@ function backupSheets(db) {
   });
   const cot = [['Número', 'Cliente / prospecto', 'Teléfono', 'Fecha', 'Vigencia', 'Total', 'Estado']];
   db.quotes.forEach((q) => { const w = quoteWho(q, db); cot.push([q.number, w.name + (q.client_id ? '' : ' (prospecto)'), w.phone, (q.created_at || '').slice(0, 10), q.valid_until, quoteTotals(q).total, QUOTE_LABEL[quoteStatus(q)]]); });
-  return [{ name: 'Clientes', rows: clientes }, { name: 'Propiedades', rows: props }, { name: 'Cotizaciones', rows: cot }, { name: 'Facturas', rows: facturas }, { name: 'Pagos', rows: pagos }, { name: 'Lecturas químicas', rows: lecturas }];
+  return [{ name: 'Clientes', rows: clientes }, { name: 'Propiedades', rows: props }, { name: 'Cotizaciones', rows: cot }, { name: 'Facturas', rows: facturas }, { name: 'Pagos', rows: pagos }, { name: 'Gastos', rows: gastos }, { name: 'Compras por producto', rows: compras }, { name: 'Lecturas químicas', rows: lecturas }];
 }
 
 /* ---------- ubicación y fotos con sello ---------- */
@@ -1389,4 +1512,4 @@ async function processPhoto(file, kind, coords) {
   return { uri: cv.toDataURL('image/jpeg', 0.72), w, h };
 }
 
-if (typeof module !== 'undefined') module.exports = { QUOTE_TPLS, quoteScope, qrMatrix, buildReceiptDoc, TERMS, termsLabel, dueFor, PAY_METHODS, invPaid, invBalance, clientCredit, clientOwed, routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
+if (typeof module !== 'undefined') module.exports = { parseReceipt, classifyItem, itemSize, expenseSummary, parseMoney, QUOTE_TPLS, quoteScope, qrMatrix, buildReceiptDoc, TERMS, termsLabel, dueFor, PAY_METHODS, invPaid, invBalance, clientCredit, clientOwed, routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };

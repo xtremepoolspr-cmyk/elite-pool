@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v40 · Protección de datos';
+const APP_VERSION = 'v41 · Gastos y recibos';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -697,6 +697,7 @@ function autoInvoices() {
 }
 function invoicesTab() {
   if (UI.invMode === 'quotes') return quotesTab();
+  if (UI.invMode === 'expenses') return expensesTab();
   const period = todayISO().slice(0, 7);
   const list = T('invoices').filter((i) => UI.invFilter === 'ALL' || invView(i) === UI.invFilter).sort((a, b) => b.created_at.localeCompare(a.created_at));
   const owed = T('invoices').reduce((s, i) => s + invBalance(i, S.db), 0), paid = T('invoices').reduce((s, i) => s + (i.status === 'PAID' ? i.total_amount : invPaid(i, S.db)), 0);
@@ -772,6 +773,82 @@ async function openSnaps() {
   const b = document.getElementById('snapbox'); if (!b) return;
   b.innerHTML = `${muted('El teléfono guarda una copia por día (las últimas 7). Sirven si la app se vacía o se daña. Si borras los datos del navegador, estas copias también se borran: por eso hay que respaldar fuera del teléfono.')}<div class="mt"></div>` +
     (rows.length ? rows.map(([k, s]) => `<div class="card" style="padding:10px"><b>${esc(k === 'snap_before_restore' ? 'Antes de la última restauración' : fmtDate(k.slice(5)))}</b>${muted(`${s.counts ? s.counts.clients : (s.db.clients || []).length} cliente(s) · ${s.counts ? s.counts.properties : (s.db.properties || []).length} propiedad(es) · ${s.counts ? s.counts.invoices : (s.db.invoices || []).length} factura(s)`)}<div class="mt-s">${btn('Recuperar esta copia', 'snapRestore', { k }, 'sm')}</div></div>`).join('') : muted('Todavía no hay copias. Se crea una la primera vez que abres la app cada día.')) + `<div class="mt-s"></div>${btn('Cerrar', 'closeSheet')}`;
+}
+/* ---------- Gastos: recibos con lectura automática ---------- */
+const expRange = () => {
+  const per = UI.expPer || 'month', m = UI.expMonth || todayISO().slice(0, 7), y = m.slice(0, 4);
+  if (per === 'all') return { from: '0000-01-01', to: '9999-12-31', label: 'Todo el historial' };
+  if (per === 'year') return { from: `${y}-01-01`, to: `${y}-12-31`, label: `Año ${y}` };
+  const MN = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+  return { from: `${m}-01`, to: `${m}-31`, label: `${MN[+m.slice(5) - 1]} ${y}` };
+};
+function expensesTab() {
+  const R = expRange(), sm = expenseSummary(S.db, R.from, R.to), per = UI.expPer || 'month';
+  const cobrado = r2(T('payments').filter((p) => p.date >= R.from && p.date <= R.to).reduce((s, p) => s + (+p.amount || 0), 0));
+  let h = invModeSeg() + `<div class="mt"></div>${seg(per, [['month', 'Mes'], ['year', 'Año'], ['all', 'Todo']], 'expPer')}`;
+  if (per !== 'all') h += `<div class="row between mt-s">${btn('◀', 'expShift', { d: -1 }, 'sm ghost')}<b>${esc(R.label)}</b>${btn('▶', 'expShift', { d: 1 }, 'sm ghost')}</div>`;
+  h += `<div class="mt"></div><label class="btn dark" style="display:flex;align-items:center;justify-content:center;min-height:48px;cursor:pointer">📷 Escanear recibo<input type="file" accept="image/*" capture="environment" data-expfile="1" hidden></label><div class="mt-s"></div>${btn('✍️ Añadir gasto a mano', 'expManual', {}, 'ghost')}`;
+  h += `<div class="row mb mt"><div class="card grow" style="margin:0">${muted('Gastos')}<div class="big" style="color:${COL.bad}">${money(sm.total)}</div></div><div class="card grow" style="margin:0">${muted('IVU pagado')}<div class="big">${money(sm.tax)}</div></div></div>
+    <div class="row mb"><div class="card grow" style="margin:0">${muted('Cobrado')}<div class="big" style="color:${COL.ok}">${money(cobrado)}</div></div><div class="card grow" style="margin:0">${muted('Cobrado − gastos')}<div class="big">${money(cobrado - sm.total)}</div></div></div>`;
+  if (sm.types.length) {
+    h += `<h2>🧪 Compras por producto</h2><div class="card">` + sm.types.map((t) => `<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--border)"><div class="grow"><b>${esc(t.type)}</b>${muted(`${t.units} unidad(es)${measureLabel(t.measure) ? ' · ' + measureLabel(t.measure) : ''} · ${t.receipts} recibo(s)`)}</div><b>${money(t.amount)}</b></div>`).join('') + `</div>`;
+    h += `<h2>📊 Por categoría</h2><div class="card">` + sm.cats.map((c) => `<div class="row between" style="padding:5px 0"><span>${esc(c.cat)}</span><b>${money(c.amount)}</b></div>`).join('') + `</div>`;
+  }
+  h += `<h2>🧾 Recibos (${sm.list.length})</h2>` + (sm.list.length ? sm.list.slice().sort((x, y) => y.date.localeCompare(x.date)).map((e) => `<div class="card" data-act="expOpen" data-id="${e.id}" style="cursor:pointer"><div class="row between"><div><b>${esc(e.vendor || 'Sin comercio')}</b>${muted(fmtDate(e.date) + ' · ' + (e.items || []).length + ' renglón(es)' + (e.photo ? ' · 📷' : ''))}</div><b>${money(e.total)}</b></div></div>`).join('') : empty('Aún no hay recibos en este período. Toma la foto de un recibo para empezar.'));
+  h += muted('La lectura automática puede equivocarse: revisa siempre los datos antes de guardar. Esto es un registro de control, no sustituye a tu contador.', 'mt');
+  return { title: 'Gastos', sub: R.label, right: '', body: h };
+}
+async function loadOcr() {
+  if (window.Tesseract) return;
+  await new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js'; s.onload = res; s.onerror = () => rej(new Error('No se pudo descargar el lector')); document.head.appendChild(s); setTimeout(() => rej(new Error('Tiempo agotado')), 45000); });
+}
+async function ocrImage(file, onProg) {
+  await loadOcr();
+  let bmp; try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch (e) { bmp = await createImageBitmap(file); }
+  const sc = Math.min(1, 1800 / Math.max(bmp.width, bmp.height)), cv = document.createElement('canvas');
+  cv.width = Math.round(bmp.width * sc); cv.height = Math.round(bmp.height * sc);
+  const cx = cv.getContext('2d'); cx.drawImage(bmp, 0, 0, cv.width, cv.height);
+  const im = cx.getImageData(0, 0, cv.width, cv.height), d = im.data; let lo = 255, hi = 0;
+  for (let i = 0; i < d.length; i += 4) { const g = (d[i] * 0.3 + d[i + 1] * 0.59 + d[i + 2] * 0.11) | 0; d[i] = d[i + 1] = d[i + 2] = g; if (g < lo) lo = g; if (g > hi) hi = g; }
+  const k = hi > lo ? 255 / (hi - lo) : 1; for (let i = 0; i < d.length; i += 4) { const g = Math.max(0, Math.min(255, (d[i] - lo) * k)); d[i] = d[i + 1] = d[i + 2] = g; }
+  cx.putImageData(im, 0, 0);
+  const r = await window.Tesseract.recognize(cv, 'spa+eng', { logger: (m) => { if (m.status === 'recognizing text') onProg(`Leyendo el texto… ${Math.round(m.progress * 100)}%`); else onProg('Preparando el lector… ' + (m.status || '')); } });
+  return r.data.text || '';
+}
+async function scanReceipt(file) {
+  openSheet('📷 Leyendo recibo', '<div id="ocrmsg" class="big" style="font-size:16px">Preparando…</div>' + muted('La primera vez descarga el lector (varios MB) y necesita internet. Puede tardar un minuto.', 'mt-s'));
+  const say = (m) => { const e = document.getElementById('ocrmsg'); if (e) e.textContent = m; };
+  let photo = null, text = '', note = '';
+  try { photo = await processRef(file, 1400); } catch (e) { closeSheet(); return alert('No se pudo leer la imagen: ' + e.message); }
+  try { text = await ocrImage(file, say); } catch (e) { note = 'No pude leer el recibo automáticamente (' + e.message + '). Llena los datos a mano; la foto queda guardada.'; }
+  const p = parseReceipt(text);
+  if (!note && !p.items.length) note = 'Leí muy poco del recibo. Revisa y completa los datos.';
+  UI.xd = { id: null, date: p.date || todayISO(), vendor: p.vendor, subtotal: p.subtotal != null ? String(p.subtotal) : '', tax: p.tax != null ? String(p.tax) : '', total: p.total != null ? String(p.total) : '', method: p.method || '', note: '', photo, raw: text, items: p.items.map((i) => ({ ...i, qty: String(i.qty), amount: String(i.amount) })), warn: note };
+  renderX();
+}
+const xTypeSel = (i, cur) => `<select data-xlt="${i}">${EXP_CATS.map((c) => `<optgroup label="${c}">${EXP_TYPES[c].map((t) => `<option${t === cur ? ' selected' : ''}>${esc(t)}</option>`).join('')}</optgroup>`).join('')}</select>`;
+function renderX() {
+  const X = UI.xd, sum = r2(X.items.reduce((s, i) => s + (+i.amount || 0), 0)), sub = X.subtotal === '' ? sum : +X.subtotal;
+  const mismatch = Math.abs(sum - sub) > 0.05, chk = X.total !== '' && Math.abs(r2(sub + (+X.tax || 0)) - +X.total) > 0.05;
+  openSheet(X.id ? '🧾 Recibo' : '🧾 Revisar recibo', `${X.warn ? `<div class="card" style="border-left:6px solid ${COL.warn}">${esc(X.warn)}</div>` : ''}
+    ${X.photo ? `<img src="${X.photo.uri}" style="width:100%;max-height:150px;object-fit:contain;border-radius:8px;background:#f1f5f9">` : ''}
+    <div class="row mt-s"><div class="grow">${fld('Comercio', `<input data-xf="vendor" value="${esc(X.vendor)}" placeholder="Ej. Home Depot">`)}</div><div style="width:150px">${fld('Fecha', `<input type="date" data-xf="date" value="${esc(X.date)}">`)}</div></div>
+    <h2>Renglones del recibo</h2>
+    ${X.items.map((it, i) => `<div class="card" style="padding:10px"><div class="fld"><input data-xl="${i}:desc" value="${esc(it.desc)}" placeholder="Producto"></div><div class="row" style="align-items:center"><div class="fld" style="width:80px"><input data-xl="${i}:qty" inputmode="decimal" value="${esc(it.qty)}" placeholder="Cant."></div><div class="fld grow"><input data-xl="${i}:amount" inputmode="decimal" value="${esc(it.amount)}" placeholder="Monto $"></div>${btn('✕', 'xDelLine', { i }, 'sm ghost')}</div><div class="fld">${xTypeSel(i, it.type)}</div></div>`).join('') || muted('Sin renglones.')}
+    ${btn('+ Añadir renglón', 'xAddLine', {}, 'ghost')}
+    <h2>Totales</h2>
+    <div class="row"><div class="grow">${fld('Subtotal', `<input inputmode="decimal" data-xf="subtotal" value="${esc(X.subtotal)}" placeholder="${sum.toFixed(2)}">`)}</div><div class="grow">${fld('IVU', `<input inputmode="decimal" data-xf="tax" value="${esc(X.tax)}">`)}</div><div class="grow">${fld('Total', `<input inputmode="decimal" data-xf="total" value="${esc(X.total)}">`)}</div></div>
+    ${mismatch ? `<div style="color:${COL.warn}">⚠️ Los renglones suman ${money(sum)} y el subtotal dice ${money(sub)}. Falta o sobra algún renglón.</div>` : ''}${chk ? `<div style="color:${COL.warn}">⚠️ Subtotal + IVU no da el total del recibo.</div>` : ''}
+    ${btn('Recalcular totales con los renglones', 'xRecalc', {}, 'ghost sm')}
+    ${fld('Método de pago', `<select data-xf="method"><option value="">—</option>${Object.entries(PAY_METHODS).map(([k, v]) => `<option value="${k}"${X.method === k ? ' selected' : ''}>${esc(v)}</option>`).join('')}</select>`)}
+    ${fld('Nota (opcional)', `<input data-xf="note" value="${esc(X.note)}" placeholder="Ej. para la piscina de Ana">`)}
+    ${X.raw ? `<details class="mt-s"><summary class="muted">Ver texto leído de la foto</summary><pre style="white-space:pre-wrap;font-size:11px">${esc(X.raw)}</pre></details>` : ''}
+    <div class="btns mt">${btn('Guardar recibo', 'xSave', {})}${X.id ? btn('Eliminar', 'xDel', {}, 'ghost danger') : ''}</div>`, true);
+  UI.xOpen = true;
+}
+function openExpense(e) {
+  UI.xd = { ...JSON.parse(JSON.stringify(e)), items: (e.items || []).map((i) => ({ ...i, qty: String(i.qty), amount: String(i.amount) })), subtotal: String(e.subtotal ?? ''), tax: String(e.tax ?? ''), total: String(e.total ?? ''), warn: '' };
+  renderX();
 }
 function msgTab() {
   const M = UI.msg, tpl = TEMPLATES.find((t) => t.id === M.tpl);
@@ -881,7 +958,7 @@ function pdfView() {
    Cotizaciones
    ===================================================================== */
 const Q_COLOR = { DRAFT: COL.pending, SENT: COL.water, APPROVED: COL.ok, REJECTED: COL.bad, EXPIRED: COL.warn };
-const invModeSeg = () => seg(UI.invMode || 'invoices', [['invoices', '🧾 Facturas'], ['quotes', '📝 Cotizaciones']], 'setInvMode');
+const invModeSeg = () => seg(UI.invMode || 'invoices', [['invoices', '🧾 Facturas'], ['quotes', '📝 Cotizaciones'], ['expenses', '💸 Gastos']], 'setInvMode');
 function quotesTab() {
   const f = UI.qFilter || 'ALL', all = T('quotes');
   const list = all.filter((q) => f === 'ALL' || quoteStatus(q) === f).sort((a, b) => b.created_at.localeCompare(a.created_at));
@@ -1063,7 +1140,7 @@ function openSheet(title, html, noReset) {
 function closeSheet() {
   if (UI.eq) { UI.eq = false; S.settings.equip = S.settings.equip.filter((e) => (e.name || '').trim()); persist(); }
   if (UI.tiers) { UI.tiers = false; S.settings.tiers = S.settings.tiers.filter((t) => +t.upTo > 0 && +t.price > 0).sort((x, y) => x.upTo - y.upTo); persist(); }
-  $('#layer').innerHTML = ''; UI.dispatch = null; UI.form = null; UI.cal = null; UI.qd = null; if (UI.cat) { UI.cat = false; S.settings.catalog = S.settings.catalog.filter((x) => (x.name || '').trim()); persist(); } }
+  UI.xd = null; $('#layer').innerHTML = ''; UI.dispatch = null; UI.form = null; UI.cal = null; UI.qd = null; if (UI.cat) { UI.cat = false; S.settings.catalog = S.settings.catalog.filter((x) => (x.name || '').trim()); persist(); } }
 const sheetOpen = () => !!($('#layer') && $('#layer').firstChild);
 function go(type, id) { UI.view = { type, id }; render(); }
 
@@ -1215,6 +1292,22 @@ const A = {
   },
   openCatalog, openEquip, openTiers,
   openSnaps: () => openSnaps(),
+  expPer: (d) => { UI.expPer = d.v; render(); },
+  expShift: (d) => { const m = UI.expMonth || todayISO().slice(0, 7); let y = +m.slice(0, 4), mo = +m.slice(5); if ((UI.expPer || 'month') === 'year') y += +d.d; else { mo += +d.d; if (mo < 1) { mo = 12; y--; } if (mo > 12) { mo = 1; y++; } } UI.expMonth = `${y}-${String(mo).padStart(2, '0')}`; render(); },
+  expManual: () => { UI.xd = { id: null, date: todayISO(), vendor: '', subtotal: '', tax: '', total: '', method: '', note: '', photo: null, raw: '', items: [{ desc: '', qty: '1', amount: '', cat: 'Otros', type: 'Sin clasificar' }], warn: '' }; renderX(); },
+  expOpen: (d) => { const e = find('expenses', d.id); if (e) openExpense(e); },
+  xAddLine: () => { UI.xd.items.push({ desc: '', qty: '1', amount: '', cat: 'Otros', type: 'Sin clasificar' }); renderX(); },
+  xDelLine: (d) => { UI.xd.items.splice(+d.i, 1); renderX(); },
+  xRecalc: () => { const X = UI.xd, sum = r2(X.items.reduce((s, i) => s + (+i.amount || 0), 0)); X.subtotal = sum.toFixed(2); X.total = r2(sum + (+X.tax || 0)).toFixed(2); renderX(); },
+  xSave: () => {
+    const X = UI.xd, items = X.items.filter((i) => (i.desc || '').trim() || +i.amount).map((i) => ({ desc: (i.desc || '').trim(), qty: +i.qty || 1, amount: r2(i.amount), cat: EXP_TYPE_CAT[i.type] || i.cat || 'Otros', type: i.type || 'Sin clasificar' }));
+    const sum = r2(items.reduce((s, i) => s + i.amount, 0)), subtotal = X.subtotal === '' ? sum : r2(X.subtotal), tax = r2(X.tax), total = X.total === '' ? r2(subtotal + tax) : r2(X.total);
+    if (!X.date) return toast('Falta la fecha');
+    if (!total && !items.length) return toast('Falta el total o algún renglón');
+    upsert('expenses', { id: X.id || uid('x'), date: X.date, vendor: (X.vendor || '').trim(), subtotal, tax, total, method: X.method, note: (X.note || '').trim(), photo: X.photo || null, items, created_at: X.created_at || new Date().toISOString() });
+    UI.xd = null; closeSheet(); toast('Recibo guardado'); render();
+  },
+  xDel: () => { if (!confirm('¿Eliminar este recibo?')) return; remove('expenses', UI.xd.id); UI.xd = null; closeSheet(); render(); toast('Recibo eliminado'); },
   snapRestore: async (d) => {
     const s = await idbGet(d.k); if (!s || !s.db) return toast('Esa copia no se pudo leer');
     if (!confirm(`Se reemplazarán los datos actuales por la copia (${snapCounts(s.db).clients} cliente(s)). Antes se guarda una copia de lo que hay ahora. ¿Continuar?`)) return;
@@ -1582,6 +1675,8 @@ function onInput(e) {
     const o = document.getElementById('calc_out'); if (o) o.innerHTML = calcOutHtml();
   } else if (t.dataset.ql) { const [i, k] = t.dataset.ql.split(':'); UI.qd.lines[+i][k] = t.value; const e = document.getElementById('q_tot'); if (e) e.textContent = money(qdTotal()); }
   else if (t.dataset.qp) UI.qd.prospect[t.dataset.qp] = t.value;
+  else if (t.dataset.xf) UI.xd[t.dataset.xf] = t.value;
+  else if (t.dataset.xl) { const [i, f] = t.dataset.xl.split(':'); UI.xd.items[+i][f] = t.value; if (f === 'desc' && !UI.xd.items[+i].man) { const c = classifyItem(t.value); UI.xd.items[+i].type = c.type; UI.xd.items[+i].cat = c.cat; const sel = document.querySelector(`[data-xlt="${i}"]`); if (sel) sel.value = c.type; } }
   else if (t.dataset.qf) UI.qd[t.dataset.qf] = t.value;
   else if (t.id === 'q_disc') { UI.qd.discount = t.value; const e = document.getElementById('q_tot'); if (e) e.textContent = money(qdTotal()); }
   else if (t.id === 'q_valid') UI.qd.valid_until = t.value;
@@ -1602,6 +1697,9 @@ function onInput(e) {
 async function onChange(e) {
   const t = e.target;
   if (t.dataset.qwhy) { UI.qd.why = t.checked; return; }
+  if (t.dataset.expfile && t.files && t.files[0]) { const f = t.files[0]; t.value = ''; return scanReceipt(f); }
+  if (t.dataset.xlt) { const it = UI.xd.items[+t.dataset.xlt]; it.type = t.value; it.cat = EXP_TYPE_CAT[t.value] || 'Otros'; it.man = true; return; }
+  if (t.dataset.xf === 'method') { UI.xd.method = t.value; return; }
   if (t.dataset.chk) { // checklist de parada u orden
     const tbl = t.dataset.chk === 'stop' ? 'stops' : 'workOrders', row = find(tbl, t.dataset.owner);
     upsert(tbl, { ...row, checklist: row.checklist.map((c) => (c.id === t.dataset.id ? { ...c, done: t.checked } : c)) });

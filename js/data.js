@@ -17,7 +17,7 @@ const WORK_ORDER_TEMPLATES = {
 const mkChecklist = (prefix, labels = DEFAULT_CHECKLIST) => labels.map((label, i) => ({ id: `${prefix}_c${i}`, label, done: false }));
 
 const SAMPLE_DAYS = { c1: [1, 4], c2: [2, 5], c3: [1, 3, 5], c4: [3], c5: [2, 4], c6: [] };
-const TABLES = ['clients', 'properties', 'waterBodies', 'equipment', 'routes', 'stops', 'readings', 'dosages', 'workOrders', 'shoppingItems', 'invoices', 'payments', 'quotes', 'photos', 'dispatchLog'];
+const TABLES = ['clients', 'properties', 'waterBodies', 'equipment', 'routes', 'stops', 'readings', 'dosages', 'workOrders', 'shoppingItems', 'invoices', 'payments', 'quotes', 'expenses', 'photos', 'dispatchLog'];
 
 /** Base de datos vacía: la app arranca sin clientes de ejemplo. */
 function emptyDb() { const db = {}; TABLES.forEach((t) => { db[t] = []; }); return db; }
