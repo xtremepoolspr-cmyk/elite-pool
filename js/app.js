@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v38 · Propuestas comerciales';
+const APP_VERSION = 'v40 · Protección de datos';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -23,8 +23,23 @@ const online = () => navigator.onLine && !UI.simOffline;
 const idb = () => new Promise((res, rej) => { const r = indexedDB.open('epspr', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
 const idbGet = async (k) => { const d = await idb(); return new Promise((res) => { const q = d.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(undefined); }); };
 const idbSet = async (k, v) => { const d = await idb(); return new Promise((res) => { const t = d.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(); t.onerror = () => res(); }); };
+/* Lectura estricta y copias internas de seguridad (una por día, las últimas 7) */
+const idbGetStrict = async (k) => { const d = await idb(); return new Promise((res, rej) => { const q = d.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); };
+const idbKeys = async () => { try { const d = await idb(); return await new Promise((res) => { const q = d.transaction('kv').objectStore('kv').getAllKeys(); q.onsuccess = () => res(q.result || []); q.onerror = () => res([]); }); } catch (e) { return []; } };
+const idbDel = async (k) => { try { const d = await idb(); return await new Promise((res) => { const t = d.transaction('kv', 'readwrite'); t.objectStore('kv').delete(k); t.oncomplete = () => res(); t.onerror = () => res(); }); } catch (e) { /* nada */ } };
+const snapCounts = (db) => ({ clients: (db.clients || []).length, properties: (db.properties || []).length, invoices: (db.invoices || []).length });
+async function makeSnap(force) {
+  try {
+    if (!S.db || S.loadFailed || !(S.db.clients.length || S.db.properties.length)) return;
+    const key = 'snap_' + todayISO(), have = await idbGet(key);
+    if (have && !force) return;
+    await idbSet(key, { ts: new Date().toISOString(), db: S.db, settings: S.settings, counts: snapCounts(S.db) });
+    const old = (await idbKeys()).filter((k) => /^snap_\d{4}-/.test(k)).sort().reverse().slice(7);
+    for (const k of old) await idbDel(k);
+  } catch (e) { /* nada */ }
+}
 let persistTimer = null;
-const persist = () => { clearTimeout(persistTimer); persistTimer = setTimeout(() => idbSet('state', { db: S.db, queue: S.queue, lastSync: S.lastSync, settings: S.settings, demoPurged: S.demoPurged, lastBackup: S.lastBackup, lock: S.lock }).catch(() => {}), 300); };
+const persist = () => { if (S.loadFailed) return; clearTimeout(persistTimer); persistTimer = setTimeout(() => idbSet('state', { db: S.db, queue: S.queue, lastSync: S.lastSync, settings: S.settings, demoPurged: S.demoPurged, lastBackup: S.lastBackup, lock: S.lock }).catch(() => {}), 300); };
 
 /* ---------- mutaciones + cola de sincronización ---------- */
 let renderQueued = false;
@@ -438,6 +453,7 @@ function clientView(id) {
       <div class="mt-s">${btn('📅 Airbnb / fechas específicas' + ((p.dates || []).length ? ` (${(p.dates || []).length})` : ''), 'openCal', { id: p.id }, 'sm ghost')}${(p.dates || []).filter((x) => x.d >= todayISO()).length ? muted('Próximas: ' + esc((p.dates || []).filter((x) => x.d >= todayISO()).slice(0, 4).map((x) => fmtDate(x.d).replace(/ \d{4}$/, '') + (x.t ? ' ' + fmtHM(x.t) : '')).join(' · ')) + ((p.dates || []).filter((x) => x.d >= todayISO()).length > 4 ? ' …' : ''), 'mt-s') : ''}</div>
       ${pauseActive(p.pause) ? `<div class="mt-s"><b style="color:${COL.warn}">${esc(pauseLabel(p.pause))}</b></div>` : ''}
       <div class="mt-s">${btn(pauseActive(p.pause) ? '⏸ Editar pausa' : '⏸ Pausar', 'pauseSheet', { t: 'p', id: p.id }, 'sm ghost')}</div>
+      ${tierHint(p, c)}
       ${refBlock(p)}
       <div class="btns">${btn('🧪 Productos', 'propChem', { id: p.id }, 'sm ghost')}${btn('Editar', 'editProp', { id: p.id, c: c.id }, 'sm ghost')}${btn('🗑', 'delProp', { id: p.id }, 'sm ghost')}${btn('+ Cuerpo de agua', 'newWb', { p: p.id }, 'sm')}</div>`;
     T('waterBodies').filter((w) => w.property_id === p.id).forEach((w) => {
@@ -668,7 +684,7 @@ function debtorsHtml() {
   const tot = r2(list.reduce((s, d) => s + d.total, 0));
   return `<h2>💸 Quién me debe (${list.length})</h2><div class="card" style="border-left:6px solid ${COL.bad}">${muted('Vencido en total: ' + money(tot))}` + list.map((d) => `<div class="row between" style="padding:8px 0;border-top:1px solid var(--border);margin-top:8px"><div class="grow"><b>${esc(d.c.name)}</b>${muted(`${money(d.total)} · ${d.days} día(s) de atraso${d.c.last_reminder ? ' · recordado ' + fmtDate(d.c.last_reminder) : ''}`)}</div>${btn('📲 Recordar', 'remind', { id: d.c.id }, 'sm')}</div>`).join('') + `${muted('Se abre WhatsApp (o tu canal preferido) con el mensaje listo; solo toca enviar.', 'mt-s')}</div>`;
 }
-const backupBanner = () => (backupStale() && !UI.bkSnooze && T('clients').length ? `<div class="card" style="border-left:6px solid ${COL.warn}"><b>💾 ${S.lastBackup ? 'Hace ' + Math.max(1, Math.round((Date.now() - new Date(S.lastBackup).getTime()) / 864e5)) + ' día(s) sin respaldo' : 'Aún no has hecho un respaldo'}</b>${muted('Tus datos viven solo en este teléfono. Envíatelo por correo, WhatsApp o Drive: toma 10 segundos.')}<div class="btns mt-s">${btn('📤 Respaldar ahora', 'shareBackup', {}, 'sm')}${btn('Más tarde', 'snoozeBackup', {}, 'sm ghost')}</div></div>` : '');
+const backupBanner = () => (S.loadFailed ? `<div class="card" style="border-left:6px solid ${COL.bad}"><b>⚠️ No pude leer tus datos guardados</b>${muted('Para no pisarlos, la app NO está guardando nada ahora. Cierra la app por completo y ábrela de nuevo. Si sigue igual, no hagas cambios y avísame.')}</div>` : '') + (backupStale() && !UI.bkSnooze && T('clients').length ? `<div class="card" style="border-left:6px solid ${COL.warn}"><b>💾 ${S.lastBackup ? 'Hace ' + Math.max(1, Math.round((Date.now() - new Date(S.lastBackup).getTime()) / 864e5)) + ' día(s) sin respaldo' : 'Aún no has hecho un respaldo'}</b>${muted('Tus datos viven solo en este teléfono. Envíatelo por correo, WhatsApp o Drive: toma 10 segundos.')}<div class="btns mt-s">${btn('📤 Respaldar ahora', 'shareBackup', {}, 'sm')}${btn('Más tarde', 'snoozeBackup', {}, 'sm ghost')}</div></div>` : '');
 /** Crea (como borrador) las facturas de cuota mensual del mes la primera vez que abres la app ese mes. */
 function autoInvoices() {
   const a = S.settings.auto, today = todayISO(), period = today.slice(0, 7);
@@ -745,8 +761,17 @@ async function restoreBackup(file) {
   if (!data || data.app !== 'elite-pool-pwa' || !data.db || !Array.isArray(data.db.clients)) return alert('Ese archivo no es un respaldo de Elite Pool Service PR.');
   const n = data.db.clients.length;
   if (!confirm(`Se reemplazarán TODOS los datos actuales por el respaldo (${n} cliente(s), guardado el ${fmtDateTime(data.exported_at)}). ¿Continuar?`)) return;
-  S.db = migrateDb(data.db); S.settings = mergeSettings(data.settings); S.queue = []; S.demoPurged = true; UI.drafts = {}; UI.view = null;
-  persist(); render(); toast(`Respaldo restaurado: ${n} cliente(s)`);
+  if (S.db && !S.loadFailed && (S.db.clients.length || S.db.properties.length)) await idbSet('snap_before_restore', { ts: new Date().toISOString(), db: S.db, settings: S.settings, counts: snapCounts(S.db) });
+  S.loadFailed = false; S.db = migrateDb(data.db); S.settings = mergeSettings(data.settings); S.queue = []; S.demoPurged = true; UI.drafts = {}; UI.view = null;
+  persist(); makeSnap(true); render(); toast(`Respaldo restaurado: ${n} cliente(s)`);
+}
+async function openSnaps() {
+  openSheet('🛟 Copias internas de seguridad', '<div id="snapbox">Cargando…</div>');
+  const keys = (await idbKeys()).filter((k) => /^snap_/.test(k)).sort().reverse(), rows = [];
+  for (const k of keys) { const s = await idbGet(k); if (s && s.db) rows.push([k, s]); }
+  const b = document.getElementById('snapbox'); if (!b) return;
+  b.innerHTML = `${muted('El teléfono guarda una copia por día (las últimas 7). Sirven si la app se vacía o se daña. Si borras los datos del navegador, estas copias también se borran: por eso hay que respaldar fuera del teléfono.')}<div class="mt"></div>` +
+    (rows.length ? rows.map(([k, s]) => `<div class="card" style="padding:10px"><b>${esc(k === 'snap_before_restore' ? 'Antes de la última restauración' : fmtDate(k.slice(5)))}</b>${muted(`${s.counts ? s.counts.clients : (s.db.clients || []).length} cliente(s) · ${s.counts ? s.counts.properties : (s.db.properties || []).length} propiedad(es) · ${s.counts ? s.counts.invoices : (s.db.invoices || []).length} factura(s)`)}<div class="mt-s">${btn('Recuperar esta copia', 'snapRestore', { k }, 'sm')}</div></div>`).join('') : muted('Todavía no hay copias. Se crea una la primera vez que abres la app cada día.')) + `<div class="mt-s"></div>${btn('Cerrar', 'closeSheet')}`;
 }
 function msgTab() {
   const M = UI.msg, tpl = TEMPLATES.find((t) => t.id === M.tpl);
@@ -863,7 +888,7 @@ function quotesTab() {
   const sum = (arr) => arr.reduce((s, q) => s + quoteTotals(q).total, 0);
   const pend = all.filter((q) => ['DRAFT', 'SENT'].includes(quoteStatus(q))), won = all.filter((q) => q.status === 'APPROVED');
   let h = invModeSeg() + `<div class="row mb mt"><div class="card grow" style="margin:0">${muted('Pendientes (' + pend.length + ')')}<div class="big" style="color:${COL.water}">${money(sum(pend))}</div></div><div class="card grow" style="margin:0">${muted('Aprobadas (' + won.length + ')')}<div class="big" style="color:${COL.ok}">${money(sum(won))}</div></div></div>
-    ${btn('📋 Catálogo de servicios y precios', 'openCatalog', {}, 'ghost')}<div class="mt"></div>
+    ${btn('📋 Catálogo de servicios y precios', 'openCatalog', {}, 'ghost')}<div class="mt-s"></div>${btn('📦 Catálogo de equipos (bombas, calentadores…)', 'openEquip', {}, 'ghost')}<div class="mt-s"></div>${btn('💧 Precio por galones', 'openTiers', {}, 'ghost')}<div class="mt-s"></div>${btn('🛟 Copias internas de seguridad', 'openSnaps', {}, 'ghost')}<div class="mt"></div>
     <div class="chips">${chip('Todas', f === 'ALL', 'setQFilter', { v: 'ALL' })}${Object.keys(QUOTE_LABEL).map((s) => chip(QUOTE_LABEL[s], f === s, 'setQFilter', { v: s }, Q_COLOR[s])).join('')}</div>`;
   h += list.length ? '<div class="cols">' + list.map((q) => { const st = quoteStatus(q), w = quoteWho(q, S.db); return `<div class="card bar tap" style="border-left-color:${Q_COLOR[st]}" data-act="openQuote" data-id="${q.id}"><div class="row between"><b>${esc(w.name)}${q.client_id ? '' : ' <span class="muted">(prospecto)</span>'}</b>${badge(QUOTE_LABEL[st], Q_COLOR[st])}</div>${muted(esc(q.number) + ' · vigencia ' + fmtDate(q.valid_until))}<div class="amount mt-s">${money(quoteTotals(q).total)}</div></div>`; }).join('') + '</div>'
     : empty(all.length ? 'No hay cotizaciones con este estado.' : 'Aún no hay cotizaciones. Toca «+ Cotización» para crear la primera.');
@@ -886,7 +911,7 @@ function quoteView(id) {
   h += `<div class="mt"></div><div class="btns">${btn('✏️ Editar', 'editQuote', { id: q.id }, 'sm ghost')}${btn('⧉ Duplicar', 'dupQuote', { id: q.id }, 'sm ghost')}${btn('👁 PDF', 'previewQuote', { id: q.id }, 'sm ghost')}</div><div class="mt-s"></div>${btn('Eliminar cotización', 'delQuote', { id: q.id }, 'sm danger')}`;
   return { title: `Cotización ${q.number}`, body: h, footer: btn('📤 Enviar cotización', 'sendQuote', { id: q.id }) };
 }
-const qdNew = () => ({ id: null, mode: activeClients().length ? 'client' : 'prospect', client_id: '', prospect: { name: '', phone: '', email: '', address: '' }, lines: [{ description: '', qty: '1', price: '' }], discount: '', notes: '', valid_until: addDays(todayISO(), +S.settings.quote.validDays || 15), tpl: 'blank', title: '', intro: '', scope: '', freq: '', chem: '', why: true });
+const qdNew = () => ({ id: null, mode: activeClients().length ? 'client' : 'prospect', client_id: '', prospect: { name: '', phone: '', email: '', address: '' }, lines: [{ description: '', qty: '1', price: '' }], discount: '', notes: '', valid_until: addDays(todayISO(), +S.settings.quote.validDays || 15), tpl: 'blank', title: '', intro: '', scope: '', freq: '', chem: '', why: true, eqCat: '' });
 function openQuoteForm(id) {
   const q = id && find('quotes', id);
   UI.qd = q ? { id: q.id, mode: q.client_id ? 'client' : 'prospect', client_id: q.client_id || '', prospect: { name: '', phone: '', email: '', address: '', ...(q.prospect || {}) }, lines: q.lines.map((l) => ({ description: l.description, qty: String(l.qty), price: String(l.price) })), discount: q.discount ? String(q.discount) : '', notes: q.notes || '', valid_until: q.valid_until, tpl: 'edit', title: q.title || '', intro: q.intro || '', scope: q.scope || '', freq: q.freq || '', chem: q.chem || '', why: q.why !== false } : qdNew();
@@ -908,6 +933,9 @@ function renderQ() {
     ${fld('Frecuencia', `<input data-qf="freq" value="${esc(Q.freq)}" placeholder="Ej. 2 visitas por semana">`)}
     <div class="fld"><label>Productos químicos</label><div class="chips">${[['', 'No mencionar'], ['incl', 'Incluidos en el precio'], ['extra', 'Se facturan aparte']].map(([v, l]) => chip(l, Q.chem === v, 'qChem', { v })).join('')}</div></div>
     <div class="chk"><span class="t">Incluir «Por qué elegirnos» (se edita en Ajustes)</span><label class="sw"><input type="checkbox" data-qwhy="1"${Q.why ? ' checked' : ''}><i></i></label></div>
+    <h2>Equipos y materiales</h2>
+    ${muted('Toca una categoría y luego el producto: se añade con tu precio de venta (si ya pusiste el costo).')}<div class="chips mt-s">${EQ_CATS.map((c) => chip(c, Q.eqCat === c, 'qEqCat', { c })).join('')}</div>
+    ${Q.eqCat ? `<div class="chips mt-s">${S.settings.equip.filter((e) => e.cat === Q.eqCat && (e.name || '').trim()).map((e) => chip(`${e.name}${eqPrice(e, S.settings) ? ' · ' + money(eqPrice(e, S.settings)) : ''}`, false, 'qAddEq', { id: e.id })).join('')}</div>` : ''}
     <h2>Servicios y precios</h2>
     ${S.settings.catalog.length ? `${muted('Toca para añadir del catálogo')}<div class="chips mt-s">${S.settings.catalog.map((x, i) => chip(`${x.name} · ${money(x.price)}`, false, 'qAddCat', { i })).join('')}</div>` : ''}
     ${Q.lines.map((l, i) => `<div class="card" style="padding:10px"><div class="fld" style="margin-bottom:8px"><label>Descripción</label><input data-ql="${i}:description" value="${esc(l.description)}" placeholder="Ej. Cambio de arena del filtro"></div>
@@ -916,6 +944,35 @@ function renderQ() {
     ${btn('+ Línea en blanco', 'qAddLine', {}, 'sm ghost')}
     <h2>Detalles</h2>${fld('Descuento ($, opcional)', `<input id="q_disc" inputmode="decimal" value="${esc(Q.discount)}">`)}${fld('Válida hasta', `<input id="q_valid" type="date" value="${esc(Q.valid_until)}">`)}${fld('Notas para el cliente (opcional)', `<textarea id="q_notes">${esc(Q.notes)}</textarea>`)}
     <div class="card"><div class="row between"><b>Total</b><span class="amount" id="q_tot">${money(qdTotal())}</span></div></div>${btn('Guardar cotización', 'saveQuote')}`;
+}
+/* ---- Catálogo de equipos ---- */
+const eqInfo = (e) => { const p = eqPrice(e, S.settings); if (!p) return 'Pon tu costo del suplidor y te calculo el precio de venta'; const g = r2(p - e.cost); return `Venta sugerida <b>${money(p)}</b> · ganancia ${money(g)} (${Math.round((g / p) * 100)}% del precio)`; };
+function openEquip() { UI.eq = true; UI.eqCat = UI.eqCat || EQ_CATS[0]; openSheet('📦 Catálogo de equipos', '<div id="eqbox"></div>'); renderEq(); }
+function renderEq() {
+  const b = document.getElementById('eqbox'); if (!b) return;
+  const items = S.settings.equip.filter((e) => e.cat === UI.eqCat);
+  b.innerHTML = `${muted('Escribe lo que te cobra el suplidor y la app calcula el precio de venta con tu porcentaje de ganancia. Los modelos son una lista de partida: corrígelos o añade los tuyos.')}
+    <div class="fld mt"><label>Ganancia general sobre el costo (%)</label><input data-eqg="1" inputmode="decimal" value="${S.settings.markup}"></div>
+    <div class="chips">${EQ_CATS.map((c) => chip(c, UI.eqCat === c, 'eqCat', { c })).join('')}</div><div class="mt-s"></div>
+    ${items.map((e) => `<div class="card" style="padding:10px"><div class="fld" style="margin-bottom:8px"><label>Producto (marca y modelo)</label><input data-eq="${e.id}:name" value="${esc(e.name)}"></div><div class="g2"><div class="fld" style="margin:0"><label>Costo del suplidor ($)</label><input data-eq="${e.id}:cost" inputmode="decimal" value="${e.cost === '' ? '' : e.cost}"></div><div class="fld" style="margin:0"><label>Ganancia % (vacío = general)</label><input data-eq="${e.id}:markup" inputmode="decimal" value="${e.markup === '' ? '' : e.markup}" placeholder="${S.settings.markup}"></div></div><div class="row between mt-s"><span id="eqp_${e.id}" class="muted" style="font-size:12px">${eqInfo(e)}</span><button class="btn sm ghost" data-act="eqDel" data-id="${e.id}">Quitar</button></div></div>`).join('') || empty('Sin productos en esta categoría.')}
+    ${btn('+ Añadir en ' + UI.eqCat, 'eqAdd', {}, 'ghost')}<div class="mt-s"></div>${btn('Listo', 'closeSheet')}`;
+}
+function openTiers() { UI.tiers = true; openSheet('💧 Precio por galones', '<div id="tierbox"></div>'); renderTiers(); }
+function renderTiers() {
+  const b = document.getElementById('tierbox'); if (!b) return;
+  b.innerHTML = `${muted('Precio por servicio semanal según los galones de la piscina. En cada propiedad verás el precio sugerido con un botón para aplicarlo. Si una piscina pasa del último rango, se cotiza aparte.')}<div class="mt"></div>
+    ${S.settings.tiers.map((t, i) => `<div class="card" style="padding:10px"><div class="g2"><div class="fld" style="margin:0"><label>Hasta (galones)</label><input data-tier="${i}:upTo" inputmode="numeric" value="${t.upTo || ''}"></div><div class="fld" style="margin:0"><label>Precio por servicio ($)</label><input data-tier="${i}:price" inputmode="decimal" value="${t.price || ''}"></div></div><div class="mt-s"><button class="btn sm ghost" data-act="tierDel" data-i="${i}">Quitar</button></div></div>`).join('')}
+    ${btn('+ Añadir rango', 'tierAdd', {}, 'ghost')}<div class="mt-s"></div>${btn('Listo', 'closeSheet')}`;
+}
+/** Sugerencia de precio de una propiedad según sus galones totales. */
+function tierHint(p, c) {
+  const gal = T('waterBodies').filter((w) => w.property_id === p.id).reduce((s, w) => s + (+w.gallons || 0), 0); if (!gal) return '';
+  const per = tierPrice(gal, S.settings.tiers), g = gal.toLocaleString('es-PR');
+  if (per == null) return muted(`💧 ${g} galones: pasa del último rango de tu tabla, cotízala aparte.`, 'mt-s');
+  const monthly = c.fee_type === 'PER_SERVICE' ? per : Math.round(per * (p.service_days || []).length * 4 || per * 4), val = c.fee_type === 'PER_SERVICE' ? per : monthly;
+  const cur = p.fee != null && p.fee !== '' ? +p.fee : null;
+  const txt = c.fee_type === 'PER_SERVICE' ? `${money(per)} por servicio` : `${money(per)} por servicio → ${money(monthly)}/mes (${Math.max(1, (p.service_days || []).length) * 4} visitas)`;
+  return `<div class="mt-s">${muted(`💧 ${g} galones: sugerido ${txt}`)}${cur === val ? muted('✓ Ya usa el precio de la tabla') : btn('Aplicar ' + money(val), 'applyTier', { id: p.id, v: val }, 'sm ghost')}</div>`;
 }
 function openCatalog() { UI.cat = true; openSheet('📋 Catálogo de servicios', '<div id="catbox"></div>'); renderCat(); }
 function renderCat() {
@@ -1003,7 +1060,10 @@ function openSheet(title, html, noReset) {
   $('#layer').innerHTML = `<div class="back-drop" data-act="closeSheet"></div><div class="sheet"><div class="sh"><b>${esc(title)}</b><button class="x" data-act="closeSheet">✕</button></div>${html}</div>`;
   if (!noReset) UI.dispatch = null;
 }
-function closeSheet() { $('#layer').innerHTML = ''; UI.dispatch = null; UI.form = null; UI.cal = null; UI.qd = null; if (UI.cat) { UI.cat = false; S.settings.catalog = S.settings.catalog.filter((x) => (x.name || '').trim()); persist(); } }
+function closeSheet() {
+  if (UI.eq) { UI.eq = false; S.settings.equip = S.settings.equip.filter((e) => (e.name || '').trim()); persist(); }
+  if (UI.tiers) { UI.tiers = false; S.settings.tiers = S.settings.tiers.filter((t) => +t.upTo > 0 && +t.price > 0).sort((x, y) => x.upTo - y.upTo); persist(); }
+  $('#layer').innerHTML = ''; UI.dispatch = null; UI.form = null; UI.cal = null; UI.qd = null; if (UI.cat) { UI.cat = false; S.settings.catalog = S.settings.catalog.filter((x) => (x.name || '').trim()); persist(); } }
 const sheetOpen = () => !!($('#layer') && $('#layer').firstChild);
 function go(type, id) { UI.view = { type, id }; render(); }
 
@@ -1153,7 +1213,23 @@ const A = {
     upsert('workOrders', { id, client_id: q.client_id, property_id: d.p, type: 'Reparación de Equipos', status: 'OPEN', description: `Cotización ${q.number}: ` + q.lines.map((l) => l.description).join('; '), price: t.total, checklist: mkChecklist(id, q.lines.map((l) => l.description)), client_note: '', created_at: new Date().toISOString() });
     upsert('quotes', { ...find('quotes', q.id), order_id: id }); toast('Orden de trabajo creada (pestaña Órdenes)');
   },
-  openCatalog,
+  openCatalog, openEquip, openTiers,
+  openSnaps: () => openSnaps(),
+  snapRestore: async (d) => {
+    const s = await idbGet(d.k); if (!s || !s.db) return toast('Esa copia no se pudo leer');
+    if (!confirm(`Se reemplazarán los datos actuales por la copia (${snapCounts(s.db).clients} cliente(s)). Antes se guarda una copia de lo que hay ahora. ¿Continuar?`)) return;
+    if (S.db && (S.db.clients.length || S.db.properties.length) && !S.loadFailed) await idbSet('snap_before_restore', { ts: new Date().toISOString(), db: S.db, settings: S.settings, counts: snapCounts(S.db) });
+    S.loadFailed = false; S.db = migrateDb(s.db); S.settings = mergeSettings(s.settings); S.queue = []; S.demoPurged = true; UI.drafts = {}; UI.view = null;
+    persist(); closeSheet(); render(); toast('Copia recuperada');
+  },
+  eqCat: (d) => { UI.eqCat = d.c; renderEq(); },
+  eqAdd: () => { S.settings.equip.push({ id: uid('e'), cat: UI.eqCat, name: '', cost: '', markup: '' }); renderEq(); },
+  eqDel: (d) => { S.settings.equip = S.settings.equip.filter((e) => e.id !== d.id); persist(); renderEq(); },
+  tierAdd: () => { S.settings.tiers.push({ upTo: '', price: '' }); renderTiers(); },
+  tierDel: (d) => { S.settings.tiers.splice(+d.i, 1); persist(); renderTiers(); },
+  applyTier: (d) => { const p = find('properties', d.id); upsert('properties', { ...p, fee: +d.v }); toast('Precio aplicado a la propiedad'); },
+  qEqCat: (d) => { UI.qd.eqCat = UI.qd.eqCat === d.c ? '' : d.c; renderQ(); },
+  qAddEq: (d) => { const e = S.settings.equip.find((x) => x.id === d.id), L = UI.qd.lines; if (!e) return; if (L.length === 1 && !L[0].description && !L[0].price) L.length = 0; L.push({ description: e.name, qty: '1', price: eqPrice(e, S.settings) ? String(eqPrice(e, S.settings)) : '' }); renderQ(); },
   catAdd: () => { S.settings.catalog.push({ name: '', price: 0 }); renderCat(); },
   catDel: (d) => { S.settings.catalog.splice(+d.i, 1); persist(); renderCat(); },
   openCal: (d) => openCal(d.id),
@@ -1510,6 +1586,9 @@ function onInput(e) {
   else if (t.id === 'q_disc') { UI.qd.discount = t.value; const e = document.getElementById('q_tot'); if (e) e.textContent = money(qdTotal()); }
   else if (t.id === 'q_valid') UI.qd.valid_until = t.value;
   else if (t.id === 'q_notes') UI.qd.notes = t.value;
+  else if (t.dataset.eqg) { S.settings.markup = Math.max(0, toNum(t.value) || 0); persist(); S.settings.equip.filter((e) => e.cat === UI.eqCat).forEach((e) => { const el = document.getElementById('eqp_' + e.id); if (el) el.innerHTML = eqInfo(e); }); }
+  else if (t.dataset.eq) { const [id, k] = t.dataset.eq.split(':'); const e = S.settings.equip.find((x) => x.id === id); if (e) { e[k] = k === 'name' ? t.value : (t.value.trim() === '' ? '' : toNum(t.value) || 0); persist(); const el = document.getElementById('eqp_' + id); if (el) el.innerHTML = eqInfo(e); } }
+  else if (t.dataset.tier) { const [i, k] = t.dataset.tier.split(':'); const x = S.settings.tiers[+i]; if (x) { x[k] = t.value.trim() === '' ? '' : toNum(t.value) || 0; persist(); } }
   else if (t.dataset.cat) { const [i, k] = t.dataset.cat.split(':'); const it = S.settings.catalog[+i]; if (it) { it[k] = k === 'price' ? toNum(t.value) || 0 : t.value; persist(); } }
   else if (t.id === 'cl_q') { UI.q = t.value; scheduleRender(); }
   else if (t.id === 'chem_gal') { UI.chem.gal = t.value; const sg = document.querySelector('[id^="sg_chem_"]'); if (sg) { const wb = find('waterBodies', UI.chem.wbId) || T('waterBodies').find((w) => T('properties').some((p) => p.id === w.property_id && p.client_id === UI.chem.clientId)); const gal = toNum(t.value) || (wb && wb.gallons) || 0; sg.dataset.gal = gal; sg.innerHTML = sugHtml(sg.id.slice(3), gal, draftOf(sg.id.slice(3), null), null, sg.dataset.wbp); } }
@@ -1588,14 +1667,16 @@ async function boot() {
   window.addEventListener('appinstalled', () => { UI.installEvt = null; render(); });
   setupBack(); setupAutoLock();
   try {
-    const saved = await idbGet('state');
+    const saved = await idbGetStrict('state');
     if (saved && saved.db) { S.db = saved.db; S.queue = saved.queue || []; S.lastSync = saved.lastSync || null; S.settings = mergeSettings(saved.settings); S.demoPurged = !!saved.demoPurged; S.lastBackup = saved.lastBackup || null; S.lock = saved.lock || null; if (S.lock) { UI.locked = true; UI.pin = ''; } migrateDb(S.db); }
-  } catch (e) { /* IndexedDB no disponible: se usan datos de ejemplo en memoria */ }
+    if (!saved && (await idbKeys()).some((k) => /^snap_/.test(k))) UI.recoverOffer = true;
+  } catch (e) { S.loadFailed = true; /* no se pudo leer: NO se guarda nada para no pisar tus datos */ }
   if (!S.db) { S.db = emptyDb(); S.demoPurged = true; }
   if (!S.demoPurged) { purgeDemo(); S.demoPurged = true; persist(); }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   document.addEventListener('visibilitychange', () => { if (!document.hidden && S.db) { autoInvoices(); scheduleRender(); } });
   autoInvoices(); render(); maybeSync();
+  makeSnap(); if (UI.recoverOffer) setTimeout(() => { alert('No encontré tus datos actuales, pero sí hay copias internas de seguridad. Te las muestro para que recuperes la más reciente.'); openSnaps(); }, 300);
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 if (typeof window !== 'undefined' && !window.__TEST__) boot();

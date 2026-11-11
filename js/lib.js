@@ -291,6 +291,9 @@ const DEFAULT_SETTINGS = {
   quote: { validDays: 15, accept: true, terms: 'Cotización sujeta a cambios si las condiciones de la piscina o los equipos son diferentes a lo inspeccionado.', footerText: 'Gracias por su interés en Elite Pool Service PR',
     why: 'Reporte de cada visita con lecturas del agua, enviado a su teléfono\nRegistro documentado de cloro, pH y alcalinidad en cada servicio\nRuta y horario fijos: servicio constante, semana tras semana\nAtención rápida ante cualquier problema con el agua o los equipos\nPrecios claros por escrito, sin sorpresas' },
   catalog: [],
+  markup: 30,
+  tiers: [{ upTo: 10000, price: 40 }, { upTo: 15000, price: 45 }, { upTo: 20000, price: 50 }, { upTo: 30000, price: 60 }, { upTo: 40000, price: 70 }],
+  equip: null,
   chem: { ...DEFAULT_CHEM },
   targets: { ...DEFAULT_TARGETS },
   receipt: { ask: true, msg: 'Gracias por su pago.' },
@@ -301,6 +304,21 @@ const DEFAULT_SETTINGS = {
     footerText: 'Gracias por confiar en Elite Pool Service PR',
   },
 };
+/* ---------- catálogo de equipos y precio por galones ---------- */
+const EQ_CATS = ['Bombas', 'Calentadores', 'Luces', 'Sal y cloradores', 'Filtros', 'Automatización', 'Otros'];
+const EQ_DEFAULT = {
+  Bombas: ['Pentair IntelliFlo VSF (velocidad variable)', 'Pentair IntelliPro VS (velocidad variable)', 'Pentair SuperFlo VS', 'Pentair WhisperFlo', 'Hayward Super Pump VS', 'Hayward MaxFlo VS', 'Hayward TriStar VS', 'Jandy FloPro VS', 'Jandy ePump', 'Bomba genérica 1 HP', 'Bomba genérica 1.5 HP', 'Bomba genérica 2 HP', 'Motor de bomba (reemplazo)'],
+  Calentadores: ['Pentair UltraTemp (bomba de calor)', 'Pentair MasterTemp (gas)', 'Hayward HeatPro (bomba de calor)', 'Hayward Universal H-Series (gas)', 'AquaCal TropiCal (bomba de calor)', 'Raypak (gas)', 'Jandy JXi (gas)', 'Calentador solar (paneles)'],
+  Luces: ['Pentair IntelliBrite LED', 'Hayward ColorLogic LED', 'Jandy WaterColors LED', 'Luz LED genérica', 'Transformador de luz'],
+  'Sal y cloradores': ['Hayward AquaRite (sistema de sal)', 'Pentair IntelliChlor (sistema de sal)', 'Jandy AquaPure (sistema de sal)', 'CircuPool (sistema de sal)', 'Celda de sal (reemplazo)', 'Clorinador flotante / en línea'],
+  Filtros: ['Pentair Clean & Clear (cartucho)', 'Pentair Triton (arena)', 'Hayward Star-Clear Plus (cartucho)', 'Hayward ProGrid (DE)', 'Hayward Pro-Series (arena)', 'Jandy CV / CL (cartucho)', 'Waterway (filtro)', 'Cartucho de reemplazo', 'Arena de filtro (saco)'],
+  Automatización: ['Pentair IntelliCenter', 'Hayward OmniLogic', 'Jandy iAquaLink', 'Timer / reloj de bomba'],
+  Otros: ['Robot limpiafondos (Dolphin / Polaris)', 'Válvula multipuerto', 'Sello mecánico', 'Manómetro del filtro', 'Skimmer (reemplazo)'],
+};
+const eqDefault = () => EQ_CATS.flatMap((cat, ci) => (EQ_DEFAULT[cat] || []).map((name, i) => ({ id: `e${ci}_${i}`, cat, name, cost: '', markup: '' })));
+const eqMarkup = (e, st) => (e.markup !== '' && e.markup != null && !isNaN(+e.markup) ? +e.markup : +st.markup || 0);
+const eqPrice = (e, st) => (+e.cost > 0 ? Math.round(+e.cost * (1 + eqMarkup(e, st) / 100) * 100) / 100 : 0);
+const tierPrice = (gal, tiers) => { const t = (tiers || []).filter((x) => +x.upTo > 0 && +x.price > 0).sort((a, b) => a.upTo - b.upTo).find((x) => gal <= +x.upTo); return t ? +t.price : null; };
 function mergeSettings(saved) {
   const out = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
   if (saved && typeof saved === 'object') {
@@ -309,10 +327,14 @@ function mergeSettings(saved) {
     // migración: antes el código de condiciones se guardaba en invoice.terms (compartido con el interruptor de términos)
     if (saved.invoice && typeof saved.invoice.terms === 'string') { out.invoice.termsCode = TERMS.some((t) => t[0] === saved.invoice.terms) ? saved.invoice.terms : 'NET15'; out.invoice.terms = true; }
     if (out.invoice.termsText === 'Pago dentro de 15 días a partir de la fecha de emisión. Gracias por su preferencia.') out.invoice.termsText = 'Gracias por su preferencia.';
+    if (Array.isArray(saved.equip)) out.equip = saved.equip.filter((x) => x && x.name).map((x) => ({ id: String(x.id || uid('e')), cat: EQ_CATS.includes(x.cat) ? x.cat : 'Otros', name: String(x.name), cost: x.cost === '' || x.cost == null ? '' : +x.cost || 0, markup: x.markup === '' || x.markup == null ? '' : +x.markup }));
+    if (typeof saved.markup === 'number' && saved.markup >= 0) out.markup = saved.markup;
+    if (Array.isArray(saved.tiers)) out.tiers = saved.tiers.filter((x) => x && +x.upTo > 0 && +x.price > 0).map((x) => ({ upTo: +x.upTo, price: +x.price }));
     if (saved.logo && saved.logo.data) out.logo = saved.logo;
     if (saved.chem && typeof saved.chem === 'object') out.chem = chemPrefs(saved.chem);
     if (saved.targets && typeof saved.targets === 'object') Object.keys(DEFAULT_TARGETS).forEach((k) => { const n = parseFloat(saved.targets[k]); if (!isNaN(n)) out.targets[k] = n; });
   }
+  if (!out.equip) out.equip = eqDefault();
   return out;
 }
 /** Reduce el logo y lo pasa a JPEG con fondo blanco (formato que el PDF puede incrustar directamente). */
