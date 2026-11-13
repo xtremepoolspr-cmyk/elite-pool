@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v45 · Fotos en el cliente';
+const APP_VERSION = 'v46 · Fotos en pestaña';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -705,9 +705,12 @@ function clientPhotos(c) {
   return T('photos').filter((p) => p.owner_type === 'STOP' && sm.has(p.owner_id)).map((p) => ({ ...p, prop: sm.get(p.owner_id).property_id })).sort((x, y) => (y.taken_at || '').localeCompare(x.taken_at || ''));
 }
 function photosCard(c) {
-  const all = clientPhotos(c); if (!all.length) return `<h2>📷 Fotos de servicios</h2><div class="card">${muted('Aún no hay fotos de este cliente. Las que tomes en cada parada (antes/después) aparecerán aquí.')}</div>`;
+  const all = clientPhotos(c), open = UI.photoOpen === c.id;
+  const head = `<div class="card tap" data-act="togglePhotos" data-id="${c.id}" style="display:flex;justify-content:space-between;align-items:center"><b>📷 Fotos de servicios (${all.length})</b><span>${open ? '▲' : '▼'}</span></div>`;
+  if (!open) return head;
+  if (!all.length) return head + `<div class="card">${muted('Aún no hay fotos de este cliente. Las que tomes en cada parada (antes/después) aparecerán aquí.')}</div>`;
   const list = UI.photoAll === c.id ? all : all.slice(0, 8);
-  return `<h2>📷 Fotos de servicios (${all.length})</h2><div class="card"><div class="photos">${list.map((p) => `<div data-act="viewPhoto" data-id="${p.id}" style="cursor:zoom-in"><img src="${p.uri}" alt="${p.kind}" loading="lazy"><div class="muted" style="font-size:12px">${p.kind === 'BEFORE' ? 'Antes' : 'Después'} · ${fmtDate((p.taken_at || '').slice(0, 10))}</div></div>`).join('')}</div>${all.length > 8 ? `<div class="mt-s">${btn(UI.photoAll === c.id ? 'Ver menos' : 'Ver todas (' + all.length + ')', 'photoAll', { id: c.id }, 'sm ghost')}</div>` : ''}</div>`;
+  return head + `<div class="card"><div class="photos">${list.map((p) => `<div data-act="viewPhoto" data-id="${p.id}" style="cursor:zoom-in"><img src="${p.uri}" alt="${p.kind}" loading="lazy"><div class="muted" style="font-size:12px">${p.kind === 'BEFORE' ? 'Antes' : 'Después'} · ${fmtDate((p.taken_at || '').slice(0, 10))}</div></div>`).join('')}</div>${all.length > 8 ? `<div class="mt-s">${btn(UI.photoAll === c.id ? 'Ver menos' : 'Ver todas (' + all.length + ')', 'photoAll', { id: c.id }, 'sm ghost')}</div>` : ''}</div>`;
 }
 function pendingCard(c) {
   const p = pendingFor(c), per = c.fee_type === 'PER_SERVICE';
@@ -1506,6 +1509,7 @@ const A = {
     toast(`Ruta optimizada ${src} · ≈${km1.toFixed(1)} km en línea recta${km0 - km1 > 0.2 ? ` (ahorras ≈${(km0 - km1).toFixed(1)} km)` : ''}`);
   },
   viewPhoto: (d) => { const p = find('photos', d.id); if (!p) return; const pr = find('properties', (T('stops').find((s) => s.id === p.owner_id) || {}).property_id); openSheet(`${p.kind === 'BEFORE' ? 'Antes' : 'Después'} · ${fmtDate((p.taken_at || '').slice(0, 10))}`, `<img class="refbig" src="${p.uri}" alt="">${pr ? muted(esc(pr.address), 'mt-s') : ''}<div class="btns mt-s">${p.owner_type === 'STOP' ? btn('Abrir la visita', 'openStop', { id: p.owner_id }, 'sm ghost') : ''}</div>`); },
+  togglePhotos: (d) => { UI.photoOpen = UI.photoOpen === d.id ? null : d.id; UI.photoAll = null; render(); },
   photoAll: (d) => { UI.photoAll = UI.photoAll === d.id ? null : d.id; render(); },
   openStop: (d) => go('stop', d.id),
   startStop: async (d) => {
