@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v41 · Gastos y recibos';
+const APP_VERSION = 'v43 · Facturación acumulada';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -441,6 +441,7 @@ function clientView(id) {
   const c = find('clients', id);
   if (!c) return { title: '—', body: empty('Cliente no encontrado.') };
   let h = `<div class="card"><div>📞 ${esc(c.phone || '—')}</div><div>✉️ ${esc(c.email || '—')}</div><div>💵 ${feeLabel(c)}</div>${pauseActive(c.pause) ? `<div class="mt-s"><b style="color:${COL.warn}">${esc(pauseLabel(c.pause))}</b></div>` : ''}<div class="mt-s">${btn(pauseActive(c.pause) ? '⏸ Editar pausa del cliente' : '⏸ Pausar servicio', 'pauseSheet', { t: 'c', id: c.id }, 'sm ghost')}</div><div class="mt-s">${seg(c.fee_type || 'MONTHLY', [['MONTHLY', 'Cobro mensual'], ['PER_SERVICE', 'Por servicio']], 'setPref', { id: c.id, f: 'fee_type' })}</div>${c.notes ? muted(esc(c.notes), 'mt-s') : ''}${c.tags.length ? muted('Etiquetas: ' + esc(c.tags.join(', ')), 'mt-s') : ''}</div>
+    ${pendingCard(c)}
     ${payCard(c)}
     <h2>Informe al cliente</h2><div class="card"><div class="chk"><span class="t">Mostrar hora de llegada y salida en el informe</span><label class="sw"><input type="checkbox" data-cflag="hide_times" data-id="${c.id}"${c.hide_times ? '' : ' checked'}><i></i></label></div>${muted('Las horas siempre quedan guardadas en tu registro; esto solo decide si salen en el PDF y el texto que le envías a este cliente.')}</div>
     <h2>Preferencias de envío guardadas</h2><div class="card">${muted('Canal predeterminado')}${seg(c.dispatch_channel_pref, CHANNELS, 'setPref', { id: c.id, f: 'dispatch_channel_pref' })}
@@ -471,7 +472,7 @@ function clientView(id) {
 /* formularios genéricos (hoja inferior) */
 const CLIENT_F = [
   { k: 'name', l: 'Nombre', req: 1 }, { k: 'phone', l: 'Teléfono (WhatsApp)', t: 'tel', ph: '787-555-0100' }, { k: 'email', l: 'Email', t: 'email' },
-  { k: 'fee_type', l: 'Tipo de cobro', t: 'choice', o: [['MONTHLY', 'Mensual'], ['PER_SERVICE', 'Por servicio']] }, { k: 'monthly_fee', l: 'Monto ($): por mes o por cada visita', t: 'number' }, { k: 'tags', l: 'Etiquetas (separadas por coma)', ph: 'Caguas, Residencial' },
+  { k: 'fee_type', l: 'Tipo de cobro', t: 'choice', o: [['MONTHLY', 'Mensual'], ['PER_SERVICE', 'Por servicio']] }, { k: 'monthly_fee', l: 'Monto ($): por mes o por cada visita', t: 'number' }, { k: 'billing', l: 'Si cobras por servicio: cuándo facturar', t: 'choice', o: [['EOM', 'Acumulado (a fin de mes)'], ['EACH', 'Cada servicio, el mismo día']] }, { k: 'tags', l: 'Etiquetas (separadas por coma)', ph: 'Caguas, Residencial' },
   { k: 'channel', l: 'Canal de envío predeterminado', t: 'choice', o: CHANNELS }, { k: 'format', l: 'Formato de envío predeterminado', t: 'choice', o: FORMATS }, { k: 'notes', l: 'Notas', t: 'area' },
 ];
 const PROP_F = [
@@ -514,7 +515,7 @@ function submitForm() {
   if (F.kind === 'client') {
     const old = F.id && find('clients', F.id);
     const cid = old ? old.id : uid('c');
-    upsert('clients', { id: cid, name: g('name'), phone: g('phone'), email: g('email'), dispatch_channel_pref: g('channel') || 'WHATSAPP', dispatch_format_pref: g('format') || 'TEXT', status: old ? old.status : 'ACTIVE', notes: g('notes'), fee_type: g('fee_type') === 'PER_SERVICE' ? 'PER_SERVICE' : 'MONTHLY', monthly_fee: toNum(g('monthly_fee')) || 0, tags: g('tags').split(',').map((t) => t.trim()).filter(Boolean) });
+    upsert('clients', { ...(old || {}), id: cid, name: g('name'), phone: g('phone'), email: g('email'), dispatch_channel_pref: g('channel') || 'WHATSAPP', dispatch_format_pref: g('format') || 'TEXT', status: old ? old.status : 'ACTIVE', notes: g('notes'), fee_type: g('fee_type') === 'PER_SERVICE' ? 'PER_SERVICE' : 'MONTHLY', monthly_fee: toNum(g('monthly_fee')) || 0, tags: g('tags').split(',').map((t) => t.trim()).filter(Boolean) });
     if (!old && (g('address') || g('lat'))) {
       upsert('properties', { id: uid('p'), client_id: cid, fee: toNum(g('fee')) ?? null, address: g('address') || 'Sin dirección', municipality: g('municipality'), gate_code: g('gate_code'), access_notes: '', service_days: daysOf(g('service_days')), lat: toNum(g('lat')) ?? DEPOT.lat, lng: toNum(g('lng')) ?? DEPOT.lng });
     }
@@ -685,15 +686,34 @@ function debtorsHtml() {
   return `<h2>💸 Quién me debe (${list.length})</h2><div class="card" style="border-left:6px solid ${COL.bad}">${muted('Vencido en total: ' + money(tot))}` + list.map((d) => `<div class="row between" style="padding:8px 0;border-top:1px solid var(--border);margin-top:8px"><div class="grow"><b>${esc(d.c.name)}</b>${muted(`${money(d.total)} · ${d.days} día(s) de atraso${d.c.last_reminder ? ' · recordado ' + fmtDate(d.c.last_reminder) : ''}`)}</div>${btn('📲 Recordar', 'remind', { id: d.c.id }, 'sm')}</div>`).join('') + `${muted('Se abre WhatsApp (o tu canal preferido) con el mensaje listo; solo toca enviar.', 'mt-s')}</div>`;
 }
 const backupBanner = () => (S.loadFailed ? `<div class="card" style="border-left:6px solid ${COL.bad}"><b>⚠️ No pude leer tus datos guardados</b>${muted('Para no pisarlos, la app NO está guardando nada ahora. Cierra la app por completo y ábrela de nuevo. Si sigue igual, no hagas cambios y avísame.')}</div>` : '') + (backupStale() && !UI.bkSnooze && T('clients').length ? `<div class="card" style="border-left:6px solid ${COL.warn}"><b>💾 ${S.lastBackup ? 'Hace ' + Math.max(1, Math.round((Date.now() - new Date(S.lastBackup).getTime()) / 864e5)) + ' día(s) sin respaldo' : 'Aún no has hecho un respaldo'}</b>${muted('Tus datos viven solo en este teléfono. Envíatelo por correo, WhatsApp o Drive: toma 10 segundos.')}<div class="btns mt-s">${btn('📤 Respaldar ahora', 'shareBackup', {}, 'sm')}${btn('Más tarde', 'snoozeBackup', {}, 'sm ghost')}</div></div>` : '');
-/** Crea (como borrador) las facturas de cuota mensual del mes la primera vez que abres la app ese mes. */
+/** Último día del mes con servicio programado para el cliente (todas sus propiedades activas, sin pausas). */
+function lastServiceDate(c, period) {
+  const [y, m] = period.split('-').map(Number), n = new Date(y, m, 0).getDate(), props = activeProps().filter((p) => p.client_id === c.id);
+  for (let d = n; d >= 1; d--) { const iso = `${period}-${String(d).padStart(2, '0')}`; if (props.some((p) => isSched(p, iso) && !isPaused(p, iso))) return iso; }
+  return null;
+}
+/** Lo que el cliente tiene acumulado sin facturar (visitas hechas, piezas, órdenes). */
+function pendingFor(c) {
+  const period = todayISO().slice(0, 7);
+  if (c.fee_type !== 'PER_SERVICE' && T('invoices').some((i) => i.client_id === c.id && i.period === period)) return { n: 0, amt: 0 };
+  const { invoice, stopIds } = buildInvoice(c, S.db, period, todayISO());
+  return { n: stopIds.length, amt: r2(invoice.lines.filter((l) => l.kind !== 'PREV' && l.kind !== 'CREDIT').reduce((s, l) => s + (+l.amount || 0), 0)), has: invoice.newCount > 0 };
+}
+function pendingCard(c) {
+  const p = pendingFor(c), per = c.fee_type === 'PER_SERVICE';
+  return `<h2>🧾 Por facturar</h2><div class="card">${p.has ? `<div><b>${per ? p.n + ' servicio(s) realizado(s)' : 'Cuota del mes'}</b> sin facturar · <b>${money(p.amt)}</b></div>${muted('Se van acumulando. Cuando quieras cobrar (hoy, cada 2 semanas o a fin de mes) genera la factura y envíala por WhatsApp.')}<div class="mt-s">${btn('🧾 Generar factura ahora', 'genInv', { id: c.id })}</div>` : muted('No hay nada pendiente de facturar.')}</div>`;
+}
+/** Crea (como borrador) la factura de cuota mensual el último día de servicio del mes (o al abrir la app después). */
 function autoInvoices() {
   const a = S.settings.auto, today = todayISO(), period = today.slice(0, 7);
-  if (!a || !a.invoices || a.last === period || !activeClients().length) return;
-  a.last = period;
-  const targets = activeClients().filter((c) => (c.fee_type || 'MONTHLY') === 'MONTHLY' && !pauseHit(c.pause, today) && !T('invoices').some((i) => i.client_id === c.id && i.period === period));
+  if (a && !a.v43) { a.v43 = true; a.invoices = false; persist(); return; }
+  if (!a || !a.invoices || !activeClients().length) return;
+  const targets = activeClients().filter((c) => {
+    if ((c.fee_type || 'MONTHLY') !== 'MONTHLY' || T('invoices').some((i) => i.client_id === c.id && i.period === period)) return false;
+    const d = lastServiceDate(c, period); return d && today >= d;
+  });
   const n = targets.filter(createInvoiceFor).length;
-  persist();
-  if (n) toast(`Se crearon ${n} factura(s) de ${period} como borrador. Revísalas en Facturas.`);
+  if (n) { persist(); toast(`Se crearon ${n} factura(s) de ${period} como borrador (hoy fue el último servicio del mes). Revísalas en Facturas.`); }
 }
 function invoicesTab() {
   if (UI.invMode === 'quotes') return quotesTab();
@@ -723,7 +743,7 @@ function invoiceView(id) {
 }
 function createInvoiceFor(c) {
   const period = todayISO().slice(0, 7);
-  if (T('invoices').some((i) => i.client_id === c.id && i.period === period)) return false;
+  if (c.fee_type !== 'PER_SERVICE' && T('invoices').some((i) => i.client_id === c.id && i.period === period)) return false;
   const { invoice, itemIds, orderIds, stopIds, carryIds } = buildInvoice(c, S.db, period, todayISO());
   if (!invoice.newCount) return false;
   delete invoice.newCount;
@@ -945,7 +965,7 @@ function pdfView() {
     <div class="fld mt"><label>Condiciones de pago por defecto (se pueden cambiar en cada factura)</label><select data-setv="invoice.termsCode">${optList(TERMS, st.invoice.termsCode || 'NET15')}</select></div>${muted('«Vence a la entrega» = vence el mismo día que se emite. «Fin de mes» = último día del mes de emisión. Se muestra en la factura y en el mensaje.', 'mt-s')}</div>
     <h2>🧾 Recibo de pago</h2><div class="card">${tgl('receipt', [['ask', 'Ofrecer enviar un recibo al marcar pagada / registrar un pago']])}${fld('Mensaje al final del recibo', `<input data-setv="receipt.msg" value="${esc(st.receipt.msg)}">`)}${muted('Al registrar un pago se abre el envío con el recibo listo (PDF o texto, según la preferencia del cliente). Solo tocas Enviar. Si lo apagas, puedes enviarlo con el botón 🧾 de cada pago.', 'mt-s')}</div>
     <h2>📝 Cotizaciones</h2><div class="card">${fld('Días de vigencia por defecto', `<input data-setv="quote.validDays" inputmode="numeric" value="${esc(st.quote.validDays)}">`)}${fld('Condiciones (salen al final del PDF)', `<textarea data-setv="quote.terms" style="min-height:70px">${esc(st.quote.terms)}</textarea>`)}${fld('Por qué elegirnos (una razón por línea; revísalas: que sean ciertas para tu negocio)', `<textarea data-setv="quote.why" style="min-height:110px">${esc(st.quote.why)}</textarea>`)}${fld('Texto del pie', `<input data-setv="quote.footerText" value="${esc(st.quote.footerText)}">`)}<div class="chk"><span class="t">Línea de firma «Aceptada por»</span><label class="sw"><input type="checkbox" data-set="quote.accept"${st.quote.accept ? ' checked' : ''}><i></i></label></div></div>
-    <h2>🧾 Factura — qué incluir</h2><div class="card">${tgl('auto', [['invoices', 'Crear solas las facturas de cuota mensual al empezar cada mes (quedan como borrador para que las revises y envíes)']])}${tgl('invoice', INV_OPTS)}
+    <h2>🧾 Factura — qué incluir</h2><div class="card">${tgl('auto', [['invoices', 'Crear sola la factura de cuota mensual el último día de servicio del mes (desactivado por defecto; normalmente generas tú la factura desde el cliente)']])}${tgl('invoice', INV_OPTS)}
     ${fld('Términos', `<textarea data-setv="invoice.termsText" style="min-height:70px">${esc(st.invoice.termsText)}</textarea>`)}${fld('Texto del pie', `<input data-setv="invoice.footerText" value="${esc(st.invoice.footerText)}">`)}</div>
     <h2>📄 Informe de servicio — qué incluir</h2><div class="card">${tgl('report', REP_OPTS)}
     ${fld('Texto del pie', `<input data-setv="report.footerText" value="${esc(st.report.footerText)}">`)}</div>
@@ -1592,6 +1612,7 @@ const A = {
     if (confirm(`Se crearán ${targets.length} factura(s) de ${period} (cuota o visitas realizadas + piezas instaladas + órdenes completadas).`)) targets.forEach(createInvoiceFor);
   },
   newInvoice: () => openSheet('Factura individual', `${muted('Elige el cliente (periodo ' + todayISO().slice(0, 7) + ')')}<div class="chips mt-s">${activeClients().map((c) => chip(c.name, false, 'invFor', { id: c.id })).join('')}</div>`),
+  genInv: (d) => { const c = find('clients', d.id); if (!createInvoiceFor(c)) return alert('No hay nada pendiente de facturar.'); const inv = T('invoices').filter((i) => i.client_id === c.id).slice(-1)[0]; persist(); inv ? go('invoice', inv.id) : render(); },
   invFor: (d) => { closeSheet(); if (!createInvoiceFor(find('clients', d.id))) alert('Ese cliente ya tiene factura de este periodo o no tiene nada que facturar.'); },
   setPayment: (d) => upsert('invoices', { ...find('invoices', d.id), payment_method: d.v }),
   sendReceipt: (d) => { const p = find('payments', d.id), c = p && find('clients', p.client_id); if (c) openDispatch(c.id, 'RECEIPT', buildReceiptDoc(c, p, S.settings, S.db)); },
