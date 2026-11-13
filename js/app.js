@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v43 · Facturación acumulada';
+const APP_VERSION = 'v45 · Fotos en el cliente';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -442,6 +442,7 @@ function clientView(id) {
   if (!c) return { title: '—', body: empty('Cliente no encontrado.') };
   let h = `<div class="card"><div>📞 ${esc(c.phone || '—')}</div><div>✉️ ${esc(c.email || '—')}</div><div>💵 ${feeLabel(c)}</div>${pauseActive(c.pause) ? `<div class="mt-s"><b style="color:${COL.warn}">${esc(pauseLabel(c.pause))}</b></div>` : ''}<div class="mt-s">${btn(pauseActive(c.pause) ? '⏸ Editar pausa del cliente' : '⏸ Pausar servicio', 'pauseSheet', { t: 'c', id: c.id }, 'sm ghost')}</div><div class="mt-s">${seg(c.fee_type || 'MONTHLY', [['MONTHLY', 'Cobro mensual'], ['PER_SERVICE', 'Por servicio']], 'setPref', { id: c.id, f: 'fee_type' })}</div>${c.notes ? muted(esc(c.notes), 'mt-s') : ''}${c.tags.length ? muted('Etiquetas: ' + esc(c.tags.join(', ')), 'mt-s') : ''}</div>
     ${pendingCard(c)}
+    ${photosCard(c)}
     ${payCard(c)}
     <h2>Informe al cliente</h2><div class="card"><div class="chk"><span class="t">Mostrar hora de llegada y salida en el informe</span><label class="sw"><input type="checkbox" data-cflag="hide_times" data-id="${c.id}"${c.hide_times ? '' : ' checked'}><i></i></label></div>${muted('Las horas siempre quedan guardadas en tu registro; esto solo decide si salen en el PDF y el texto que le envías a este cliente.')}</div>
     <h2>Preferencias de envío guardadas</h2><div class="card">${muted('Canal predeterminado')}${seg(c.dispatch_channel_pref, CHANNELS, 'setPref', { id: c.id, f: 'dispatch_channel_pref' })}
@@ -699,6 +700,15 @@ function pendingFor(c) {
   const { invoice, stopIds } = buildInvoice(c, S.db, period, todayISO());
   return { n: stopIds.length, amt: r2(invoice.lines.filter((l) => l.kind !== 'PREV' && l.kind !== 'CREDIT').reduce((s, l) => s + (+l.amount || 0), 0)), has: invoice.newCount > 0 };
 }
+function clientPhotos(c) {
+  const pids = new Set(T('properties').filter((p) => p.client_id === c.id).map((p) => p.id)), sm = new Map(T('stops').filter((s) => pids.has(s.property_id)).map((s) => [s.id, s]));
+  return T('photos').filter((p) => p.owner_type === 'STOP' && sm.has(p.owner_id)).map((p) => ({ ...p, prop: sm.get(p.owner_id).property_id })).sort((x, y) => (y.taken_at || '').localeCompare(x.taken_at || ''));
+}
+function photosCard(c) {
+  const all = clientPhotos(c); if (!all.length) return `<h2>📷 Fotos de servicios</h2><div class="card">${muted('Aún no hay fotos de este cliente. Las que tomes en cada parada (antes/después) aparecerán aquí.')}</div>`;
+  const list = UI.photoAll === c.id ? all : all.slice(0, 8);
+  return `<h2>📷 Fotos de servicios (${all.length})</h2><div class="card"><div class="photos">${list.map((p) => `<div data-act="viewPhoto" data-id="${p.id}" style="cursor:zoom-in"><img src="${p.uri}" alt="${p.kind}" loading="lazy"><div class="muted" style="font-size:12px">${p.kind === 'BEFORE' ? 'Antes' : 'Después'} · ${fmtDate((p.taken_at || '').slice(0, 10))}</div></div>`).join('')}</div>${all.length > 8 ? `<div class="mt-s">${btn(UI.photoAll === c.id ? 'Ver menos' : 'Ver todas (' + all.length + ')', 'photoAll', { id: c.id }, 'sm ghost')}</div>` : ''}</div>`;
+}
 function pendingCard(c) {
   const p = pendingFor(c), per = c.fee_type === 'PER_SERVICE';
   return `<h2>🧾 Por facturar</h2><div class="card">${p.has ? `<div><b>${per ? p.n + ' servicio(s) realizado(s)' : 'Cuota del mes'}</b> sin facturar · <b>${money(p.amt)}</b></div>${muted('Se van acumulando. Cuando quieras cobrar (hoy, cada 2 semanas o a fin de mes) genera la factura y envíala por WhatsApp.')}<div class="mt-s">${btn('🧾 Generar factura ahora', 'genInv', { id: c.id })}</div>` : muted('No hay nada pendiente de facturar.')}</div>`;
@@ -738,7 +748,7 @@ function invoiceView(id) {
     <div class="card mt" style="background:#f0f9ff;border-color:${COL.water}">${inv.payment_method === 'ATH_MOVIL' ? `${muted('ATH Móvil Business')}${athUrl(S.settings) ? `<div class="mt-s"><a href="${esc(athUrl(S.settings))}" target="_blank" rel="noopener" style="word-break:break-all">${esc(athUrl(S.settings))}</a></div>` : ''}${S.settings.pay.athPhone ? `<div class="big" style="color:${COL.water}">${esc(S.settings.pay.athPhone)}</div>` : ''}${!athUrl(S.settings) && !S.settings.pay.athPhone ? muted('Aún no hay enlace ni número. Configúralo abajo.') : ''}` : ''}${inv.payment_method === 'ATH_PERSONAL' ? `${muted('ATH Móvil personal')}${S.settings.pay.athPersonalPhone ? `<div class="big" style="color:${COL.water}">${esc(S.settings.pay.athPersonalPhone)}</div>` : muted('Aún no hay número personal. Configúralo en Ajustes.')}` : ''}<div class="mt-s">${esc(paymentInstructions(inv.payment_method, S.settings))}</div></div>
     <div class="mt"></div>${btn('🎨 Personalizar factura y logo', 'openPdfSettings', {}, 'ghost')}
     ${inv.status === 'DRAFT' ? btn('Eliminar borrador', 'delDraft', { id: inv.id }, 'sm danger') : ''}`;
-  const footer = btn('📤 Enviar factura (preferencia del cliente)', 'sendInvoice', { id: inv.id }) + (inv.status !== 'PAID' && !inv.carried_to ? btn('💵 Registrar pago / abono', 'payInvoice', { id: inv.id }, 'ok') + btn('✓ Marcar como pagada (todo)', 'markPaid', { id: inv.id }, 'ghost') : '');
+  const footer = btn('📤 Enviar factura (preferencia del cliente)', 'sendInvoice', { id: inv.id }) + btn('✏️ Cambiar número de factura', 'renumInvoice', { id: inv.id }, 'sm ghost') + (inv.status !== 'PAID' && !inv.carried_to ? btn('💵 Registrar pago / abono', 'payInvoice', { id: inv.id }, 'ok') + btn('✓ Marcar como pagada (todo)', 'markPaid', { id: inv.id }, 'ghost') : '');
   return { title: `Factura ${invNumber(inv, S.db)}`, body: h, footer };
 }
 function createInvoiceFor(c) {
@@ -747,6 +757,8 @@ function createInvoiceFor(c) {
   const { invoice, itemIds, orderIds, stopIds, carryIds } = buildInvoice(c, S.db, period, todayISO());
   if (!invoice.newCount) return false;
   delete invoice.newCount;
+  const ns = parseInt(S.settings.invoice.nextNo, 10);
+  if (ns > 0) { invoice.number = (S.settings.invoice.numPrefix || '') + ns; S.settings.invoice.nextNo = String(ns + 1); }
   invoice.terms = c.terms || S.settings.invoice.termsCode || 'NET15';
   invoice.due_date = dueFor(invoice.terms, invoice.issue_date);
   upsert('invoices', invoice);
@@ -962,6 +974,7 @@ function pdfView() {
     <h2 id="tpl_sec">🎨 Plantilla de factura y cotización</h2><div class="card"><div class="tplgrid">${DOC_TEMPLATES.map(([k, n, d]) => `<button class="tplc${st.invoice.template === k ? ' on' : ''}" data-act="setTemplate" data-v="${k}" style="--c:${esc(st.invoice.accent || '#0284c7')}">${tplMini(k)}<b>${n}</b><span>${d}</span></button>`).join('')}</div>
     ${muted('Color de acento', 'mt')}<div class="chips mt-s">${ACCENTS.map((c) => `<button class="swatch${(st.invoice.accent || '#0284c7') === c ? ' on' : ''}" data-act="setAccent" data-v="${c}" style="background:${c}" aria-label="${c}"></button>`).join('')}</div>${muted('Usa «👁 Factura» abajo para ver cómo queda.', 'mt-s')}</div>
     <h2>📐 Distribución de la factura</h2><div class="card"><div class="tplgrid">${INV_LAYOUTS.map(([k, n, d]) => `<button class="tplc${(INV_LAYOUTS.some((x) => x[0] === st.invoice.layout) ? st.invoice.layout : 'twocol') === k ? ' on' : ''}" data-act="setLayout" data-v="${k}" style="--c:${esc(st.invoice.accent || '#0284c7')}">${layMini(k)}<b>${n}</b><span>${d}</span></button>`).join('')}</div>
+    <div class="fld mt"><label>Numeración de facturas: próximo número (vacío = automático)</label><input data-setv="invoice.nextNo" type="number" inputmode="numeric" min="1" value="${esc(st.invoice.nextNo || '')}" placeholder="Ej.: 1000"></div><div class="fld"><label>Prefijo (opcional)</label><input data-setv="invoice.numPrefix" value="${esc(st.invoice.numPrefix || '')}" placeholder="Ej.: F-"></div>${muted('Escribe el número con el que quieres que arranque la próxima factura y de ahí sigue sumando de 1 en 1 (ej.: 1000, 1001, 1002…). Las facturas ya creadas no cambian; a cada una puedes cambiarle el número desde su pantalla.')}
     <div class="fld mt"><label>Condiciones de pago por defecto (se pueden cambiar en cada factura)</label><select data-setv="invoice.termsCode">${optList(TERMS, st.invoice.termsCode || 'NET15')}</select></div>${muted('«Vence a la entrega» = vence el mismo día que se emite. «Fin de mes» = último día del mes de emisión. Se muestra en la factura y en el mensaje.', 'mt-s')}</div>
     <h2>🧾 Recibo de pago</h2><div class="card">${tgl('receipt', [['ask', 'Ofrecer enviar un recibo al marcar pagada / registrar un pago']])}${fld('Mensaje al final del recibo', `<input data-setv="receipt.msg" value="${esc(st.receipt.msg)}">`)}${muted('Al registrar un pago se abre el envío con el recibo listo (PDF o texto, según la preferencia del cliente). Solo tocas Enviar. Si lo apagas, puedes enviarlo con el botón 🧾 de cada pago.', 'mt-s')}</div>
     <h2>📝 Cotizaciones</h2><div class="card">${fld('Días de vigencia por defecto', `<input data-setv="quote.validDays" inputmode="numeric" value="${esc(st.quote.validDays)}">`)}${fld('Condiciones (salen al final del PDF)', `<textarea data-setv="quote.terms" style="min-height:70px">${esc(st.quote.terms)}</textarea>`)}${fld('Por qué elegirnos (una razón por línea; revísalas: que sean ciertas para tu negocio)', `<textarea data-setv="quote.why" style="min-height:110px">${esc(st.quote.why)}</textarea>`)}${fld('Texto del pie', `<input data-setv="quote.footerText" value="${esc(st.quote.footerText)}">`)}<div class="chk"><span class="t">Línea de firma «Aceptada por»</span><label class="sw"><input type="checkbox" data-set="quote.accept"${st.quote.accept ? ' checked' : ''}><i></i></label></div></div>
@@ -1492,6 +1505,8 @@ const A = {
     [...fixed.map((s) => s.id), ...order].forEach((id, i) => { const s = find('stops', id); if (s.order_index !== i) upsert('stops', { ...s, order_index: i }); });
     toast(`Ruta optimizada ${src} · ≈${km1.toFixed(1)} km en línea recta${km0 - km1 > 0.2 ? ` (ahorras ≈${(km0 - km1).toFixed(1)} km)` : ''}`);
   },
+  viewPhoto: (d) => { const p = find('photos', d.id); if (!p) return; const pr = find('properties', (T('stops').find((s) => s.id === p.owner_id) || {}).property_id); openSheet(`${p.kind === 'BEFORE' ? 'Antes' : 'Después'} · ${fmtDate((p.taken_at || '').slice(0, 10))}`, `<img class="refbig" src="${p.uri}" alt="">${pr ? muted(esc(pr.address), 'mt-s') : ''}<div class="btns mt-s">${p.owner_type === 'STOP' ? btn('Abrir la visita', 'openStop', { id: p.owner_id }, 'sm ghost') : ''}</div>`); },
+  photoAll: (d) => { UI.photoAll = UI.photoAll === d.id ? null : d.id; render(); },
   openStop: (d) => go('stop', d.id),
   startStop: async (d) => {
     toast('Registrando ubicación…');
@@ -1621,6 +1636,7 @@ const A = {
     if (bal > 0) { const r = addPayment({ client_id: inv.client_id, amount: bal, method: PAY_METHODS[inv.payment_method] ? inv.payment_method : 'ATH_MOVIL', invoice_id: inv.id }); render(); offerReceipt(r && r.id); }
     else upsert('invoices', { ...inv, status: 'PAID' });
   },
+  renumInvoice: (d) => { const inv = find('invoices', d.id), n = prompt('Nuevo número para esta factura:', invNumber(inv, S.db)); if (n && n.trim()) { upsert('invoices', { ...inv, number: n.trim() }); persist(); render(); } },
   payInvoice: (d) => { const inv = find('invoices', d.id); paySheet('Registrar pago / abono', `Factura ${invNumber(inv, S.db)} · balance ${money(invBalance(inv, S.db))}. Si pagan menos, queda el balance; si pagan más, el sobrante queda como saldo a favor.`, invBalance(inv, S.db), 'savePay', { id: inv.id }); const m = $('#pay_method'); if (m && PAY_METHODS[inv.payment_method]) m.value = inv.payment_method; },
   payAdvance: (d) => paySheet('Pago adelantado', `Cliente: ${find('clients', d.id).name}. Se descontará solo en sus próximas facturas.`, '', 'savePay', { c: d.id }),
   savePay: (d) => {
