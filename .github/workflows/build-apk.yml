@@ -95,9 +95,13 @@ jobs:
             done
           done
           mkdir -p ~/.android
-          test -n "$KEYSTORE_B64" || { echo "Falta el secreto KEYSTORE_B64"; exit 1; }
-          printf '%s' "$KEYSTORE_B64" | tr -d ' \r\n\t' | base64 -d > ~/.android/debug.keystore || { echo "El secreto KEYSTORE_B64 esta incompleto o dañado: vuelve a pegarlo completo"; exit 1; }
-          keytool -list -keystore ~/.android/debug.keystore -storepass android > /dev/null || { echo "La clave del secreto KEYSTORE_B64 no es valida: vuelve a pegarla completa"; exit 1; }
+          if [ -f ../apk-clave.keystore ]; then
+            cp ../apk-clave.keystore ~/.android/debug.keystore
+          else
+            test -n "$KEYSTORE_B64" || { echo "Falta el archivo apk-clave.keystore en el repositorio"; exit 1; }
+            printf '%s' "$KEYSTORE_B64" | tr -d ' \r\n\t' | base64 -d > ~/.android/debug.keystore || { echo "El secreto KEYSTORE_B64 esta incompleto o dañado"; exit 1; }
+          fi
+          keytool -list -keystore ~/.android/debug.keystore -storepass android > /dev/null || { echo "La clave apk-clave.keystore no es valida: vuelve a subir el archivo"; exit 1; }
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
