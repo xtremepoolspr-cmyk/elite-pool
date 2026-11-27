@@ -90,12 +90,14 @@ jobs:
           for d in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
             n=${d%%:*}; z=${d##*:}; mkdir -p $R/mipmap-$n
             for f in ic_launcher ic_launcher_round ic_launcher_foreground; do
-              convert ../icons/icon-512.png -resize ${z}x${z} $R/mipmap-$n/$f.png || true
+              IM=$(command -v magick || command -v convert || true)
+              [ -n "$IM" ] && $IM ../icons/icon-512.png -resize ${z}x${z} $R/mipmap-$n/$f.png || true
             done
           done
           mkdir -p ~/.android
           test -n "$KEYSTORE_B64" || { echo "Falta el secreto KEYSTORE_B64"; exit 1; }
-          echo "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+          printf '%s' "$KEYSTORE_B64" | tr -d ' \r\n\t' | base64 -d > ~/.android/debug.keystore || { echo "El secreto KEYSTORE_B64 esta incompleto o dañado: vuelve a pegarlo completo"; exit 1; }
+          keytool -list -keystore ~/.android/debug.keystore -storepass android > /dev/null || { echo "La clave del secreto KEYSTORE_B64 no es valida: vuelve a pegarla completa"; exit 1; }
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
