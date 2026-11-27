@@ -1,7 +1,7 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v46 · Fotos en pestaña';
+const APP_VERSION = 'v48 · Ruta de ayer';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
 const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
@@ -38,8 +38,8 @@ async function makeSnap(force) {
     for (const k of old) await idbDel(k);
   } catch (e) { /* nada */ }
 }
-let persistTimer = null;
-const persist = () => { if (S.loadFailed) return; clearTimeout(persistTimer); persistTimer = setTimeout(() => idbSet('state', { db: S.db, queue: S.queue, lastSync: S.lastSync, settings: S.settings, demoPurged: S.demoPurged, lastBackup: S.lastBackup, lock: S.lock }).catch(() => {}), 300); };
+let persistTimer = null, snapAt = 0;
+const persist = () => { if (S.loadFailed) return; clearTimeout(persistTimer); persistTimer = setTimeout(() => idbSet('state', { db: S.db, queue: S.queue, lastSync: S.lastSync, settings: S.settings, demoPurged: S.demoPurged, lastBackup: S.lastBackup, lock: S.lock }).then(() => { if (Date.now() - snapAt > 20 * 60e3) { snapAt = Date.now(); makeSnap(true); } }).catch(() => {}), 300); };
 
 /* ---------- mutaciones + cola de sincronización ---------- */
 let renderQueued = false;
@@ -239,7 +239,14 @@ function weekStrip() {
     const iso = addDays(start, i), has = T('routes').some((r) => r.date === iso && r.technician_id === ME);
     return chip(`${DAYS_S[i]} ${+iso.slice(8)}${has ? ' •' : ''}`, iso === d, 'setRouteDate', { v: iso });
   }).join('');
-  return `<div class="chips">${chips}</div><div class="btns" style="margin:0 0 12px">${btn('‹ Semana', 'setRouteDate', { v: addDays(d, -7) }, 'sm ghost')}${btn('Hoy', 'setRouteDate', { v: todayISO() }, 'sm ghost')}${btn('Semana ›', 'setRouteDate', { v: addDays(d, 7) }, 'sm ghost')}</div>`;
+  return `<div class="chips">${chips}</div><div class="btns" style="margin:0 0 12px">${btn('‹ Semana', 'setRouteDate', { v: addDays(d, -7) }, 'sm ghost')}${btn('Ayer', 'setRouteDate', { v: addDays(todayISO(), -1) }, 'sm ghost')}${btn('Hoy', 'setRouteDate', { v: todayISO() }, 'sm ghost')}${btn('Semana ›', 'setRouteDate', { v: addDays(d, 7) }, 'sm ghost')}</div>${d < todayISO() ? `<div class="card" style="border-left:6px solid ${COL.warn}"><b>📅 Estás en una fecha pasada (${fmtDate(d)})</b>${muted('Lo que completes aquí queda con esa fecha: en la factura, el informe y el historial. Si no hay ruta, usa «Crear ruta» abajo.')}</div>` : ''}`;
+}
+/** Hora para sellar una visita: si la ruta es de un día pasado, se registra con esa fecha (y la hora actual). */
+function stampFor(routeId) {
+  const r = T('routes').find((x) => x.id === routeId), now = new Date();
+  if (!r || !r.date || r.date >= todayISO()) return now.toISOString();
+  const p = (n) => String(n).padStart(2, '0');
+  return new Date(`${r.date}T${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`).toISOString();
 }
 const routeStops = (r) => (r ? T('stops').filter((s) => s.route_id === r.id).sort((a, b) => a.order_index - b.order_index) : []);
 
@@ -686,7 +693,7 @@ function debtorsHtml() {
   const tot = r2(list.reduce((s, d) => s + d.total, 0));
   return `<h2>💸 Quién me debe (${list.length})</h2><div class="card" style="border-left:6px solid ${COL.bad}">${muted('Vencido en total: ' + money(tot))}` + list.map((d) => `<div class="row between" style="padding:8px 0;border-top:1px solid var(--border);margin-top:8px"><div class="grow"><b>${esc(d.c.name)}</b>${muted(`${money(d.total)} · ${d.days} día(s) de atraso${d.c.last_reminder ? ' · recordado ' + fmtDate(d.c.last_reminder) : ''}`)}</div>${btn('📲 Recordar', 'remind', { id: d.c.id }, 'sm')}</div>`).join('') + `${muted('Se abre WhatsApp (o tu canal preferido) con el mensaje listo; solo toca enviar.', 'mt-s')}</div>`;
 }
-const backupBanner = () => (S.loadFailed ? `<div class="card" style="border-left:6px solid ${COL.bad}"><b>⚠️ No pude leer tus datos guardados</b>${muted('Para no pisarlos, la app NO está guardando nada ahora. Cierra la app por completo y ábrela de nuevo. Si sigue igual, no hagas cambios y avísame.')}</div>` : '') + (backupStale() && !UI.bkSnooze && T('clients').length ? `<div class="card" style="border-left:6px solid ${COL.warn}"><b>💾 ${S.lastBackup ? 'Hace ' + Math.max(1, Math.round((Date.now() - new Date(S.lastBackup).getTime()) / 864e5)) + ' día(s) sin respaldo' : 'Aún no has hecho un respaldo'}</b>${muted('Tus datos viven solo en este teléfono. Envíatelo por correo, WhatsApp o Drive: toma 10 segundos.')}<div class="btns mt-s">${btn('📤 Respaldar ahora', 'shareBackup', {}, 'sm')}${btn('Más tarde', 'snoozeBackup', {}, 'sm ghost')}</div></div>` : '');
+const backupBanner = () => (S.loadFailed ? `<div class="card" style="border-left:6px solid ${COL.bad}"><b>⚠️ No pude leer tus datos guardados</b>${muted('Para no pisarlos, la app NO está guardando nada ahora. Cierra la app por completo y ábrela de nuevo. Si sigue igual, no hagas cambios y avísame.')}</div>` : '') + ((backupStale() || dayDoneUnsaved()) && !UI.bkSnooze && T('clients').length ? `<div class="card" style="border-left:6px solid ${COL.warn}"><b>💾 ${!backupStale() ? '¡Terminaste la ruta de hoy! Respáldala ahora' : S.lastBackup ? 'Hace ' + Math.max(1, Math.round((Date.now() - new Date(S.lastBackup).getTime()) / 864e5)) + ' día(s) sin respaldo' : 'Aún no has hecho un respaldo'}</b>${muted('Tus datos viven solo en este teléfono. Envíatelo por correo, WhatsApp o Drive: toma 10 segundos.')}<div class="btns mt-s">${btn('📤 Respaldar ahora', 'shareBackup', {}, 'sm')}${btn('Más tarde', 'snoozeBackup', {}, 'sm ghost')}</div></div>` : '');
 /** Último día del mes con servicio programado para el cliente (todas sus propiedades activas, sin pausas). */
 function lastServiceDate(c, period) {
   const [y, m] = period.split('-').map(Number), n = new Date(y, m, 0).getDate(), props = activeProps().filter((p) => p.client_id === c.id);
@@ -789,7 +796,14 @@ function msgRecipients() {
   return activeClients().filter((c) => UI.msg.area === 'ALL' || T('properties').some((p) => p.client_id === c.id && p.municipality.toLowerCase() === a) || c.tags.some((t) => t.toLowerCase() === a) || (di >= 0 && T('properties').some((p) => p.client_id === c.id && (p.service_days || []).includes(di))));
 }
 const backupBlob = () => new Blob([JSON.stringify({ app: 'elite-pool-pwa', format: 1, exported_at: new Date().toISOString(), db: S.db, settings: S.settings })], { type: 'application/json' });
-const backupStale = () => !S.lastBackup || Date.now() - new Date(S.lastBackup).getTime() > 7 * 864e5;
+const backupStale = () => !S.lastBackup || Date.now() - new Date(S.lastBackup).getTime() > 2 * 864e5;
+/** Servicios terminados desde el último respaldo; avisa al cerrar la ruta del día. */
+function dayDoneUnsaved() {
+  const t = todayISO(), rs = T('routes').filter((r) => r.date === t).map((r) => r.id), st = T('stops').filter((s) => rs.includes(s.route_id) && s.status !== 'SKIPPED');
+  if (!st.length || st.some((s) => s.status !== 'DONE')) return 0;
+  const since = S.lastBackup ? new Date(S.lastBackup).getTime() : 0;
+  return st.filter((s) => !s.completed_at || new Date(s.completed_at).getTime() > since).length;
+}
 function markBackup(msg) { S.lastBackup = new Date().toISOString(); persist(); render(); toast(msg); }
 async function restoreBackup(file) {
   let data;
@@ -1515,7 +1529,7 @@ const A = {
   startStop: async (d) => {
     toast('Registrando ubicación…');
     const c = await getCoords(), s = find('stops', d.id), r = curRoute();
-    upsert('stops', { ...s, status: 'IN_PROGRESS', check_in_time: new Date().toISOString(), check_in_lat: c ? c.lat : null, check_in_lng: c ? c.lng : null });
+    upsert('stops', { ...s, status: 'IN_PROGRESS', check_in_time: stampFor(s.route_id), check_in_lat: c ? c.lat : null, check_in_lng: c ? c.lng : null });
     if (r && r.status === 'PLANNED') upsert('routes', { ...r, status: 'IN_PROGRESS' });
     if (!c) toast('Check-in sin GPS (permiso denegado o sin señal)');
   },
@@ -1524,7 +1538,7 @@ const A = {
     const hasR = s.active_water_body_ids.some((w) => T('readings').some((r) => r.stop_id === s.id && r.water_body_id === w));
     if (!hasR && !confirm('No guardaste lecturas químicas en esta parada. ¿Completar de todos modos?')) return;
     if (s.status !== 'DONE') {
-      upsert('stops', { ...s, status: 'DONE', check_out_time: new Date().toISOString() });
+      upsert('stops', { ...s, status: 'DONE', check_out_time: stampFor(s.route_id), completed_at: new Date().toISOString() });
       const r = curRoute();
       if (r && routeStops(r).every((x) => x.status === 'DONE')) upsert('routes', { ...r, status: 'DONE' });
     }
