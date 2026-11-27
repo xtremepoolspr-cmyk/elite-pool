@@ -1,0 +1,107 @@
+name: Construir APK
+on:
+  workflow_dispatch:
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Construir
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          set -e
+          mkdir -p build/www
+          cp -r index.html styles.css manifest.webmanifest js icons build/www/
+          cd build
+          cat > www/apk-shim.js <<'SHIM_EOF'
+          /* Puente para la versión APK (Capacitor): compartir/guardar archivos y abrir enlaces como app nativa. */
+          (function () {
+            var C = window.Capacitor;
+            if (!C || !(C.isNativePlatform && C.isNativePlatform())) return;
+            var P = C.Plugins || {};
+            if (navigator.serviceWorker) navigator.serviceWorker.register = function () { return Promise.resolve(); };
+            function toB64(blob) {
+              return new Promise(function (res, rej) {
+                var r = new FileReader();
+                r.onload = function () { res(String(r.result).split(',')[1]); };
+                r.onerror = function () { rej(r.error); };
+                r.readAsDataURL(blob);
+              });
+            }
+            async function saveTemp(file) {
+              var path = 'ep_' + String(file.name || 'archivo').replace(/[^\w.\-]/g, '_');
+              var r = await P.Filesystem.writeFile({ path: path, data: await toB64(file), directory: 'CACHE' });
+              return r.uri;
+            }
+            async function shareFiles(files, title, text) {
+              var uris = [];
+              for (var i = 0; i < files.length; i++) uris.push(await saveTemp(files[i]));
+              await P.Share.share({ title: title || files[0].name, text: text || undefined, files: uris, dialogTitle: 'Compartir' });
+            }
+            navigator.canShare = function (d) { return !!(d && d.files && d.files.length && P.Share && P.Filesystem); };
+            navigator.share = async function (d) {
+              try { await shareFiles(d.files, d.title, d.text); }
+              catch (e) {
+                if (/cancel/i.test(String((e && e.message) || e))) { var x = new Error('cancelado'); x.name = 'AbortError'; throw x; }
+                throw e;
+              }
+            };
+            window.downloadBlob = function (blob, name) {
+              shareFiles([new File([blob], name, { type: blob.type || 'application/octet-stream' })], name).catch(function () {});
+            };
+            var open0 = window.open.bind(window);
+            window.open = function (url, t, f) {
+              if (url && P.AppLauncher) { P.AppLauncher.openUrl({ url: String(url) }).catch(function () { open0(url, t, f); }); return null; }
+              return open0(url, t, f);
+            };
+          })();
+          SHIM_EOF
+          sed -i 's#<script src="js/lib.js"></script>#<script src="js/lib.js"></script>\n  <script src="apk-shim.js"></script>#' www/index.html
+          test "$(grep -c 'apk-shim.js' www/index.html)" = "1" || { echo "No pude enlazar el puente APK en index.html"; exit 1; }
+          echo '{"name":"elite-pool-apk","version":"1.0.0","private":true}' > package.json
+          npm install --no-audit --no-fund @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 @capacitor/filesystem@6 @capacitor/share@6 @capacitor/app-launcher@6
+          echo '{"appId":"com.elitepoolservice.pr","appName":"Elite Pool PR","webDir":"www","server":{"androidScheme":"https"}}' > capacitor.config.json
+          npx cap add android
+          npx cap sync android
+          M=android/app/src/main/AndroidManifest.xml
+          python3 - "$M" <<'PY_EOF'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          add = ('    <uses-permission android:name="android.permission.CAMERA" />\n'
+                 '    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n'
+                 '    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n'
+                 '    <uses-feature android:name="android.hardware.camera" android:required="false" />\n'
+                 '    <uses-feature android:name="android.hardware.location.gps" android:required="false" />\n')
+          assert '</manifest>' in s
+          open(p, 'w', encoding='utf-8').write(s.replace('</manifest>', add + '</manifest>'))
+          PY_EOF
+          sed -i "s/versionCode 1/versionCode ${GITHUB_RUN_NUMBER}/; s/versionName \"1.0\"/versionName \"1.${GITHUB_RUN_NUMBER}\"/" android/app/build.gradle
+          R=android/app/src/main/res
+          rm -f $R/mipmap-anydpi-v26/*.xml || true
+          for d in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
+            n=${d%%:*}; z=${d##*:}; mkdir -p $R/mipmap-$n
+            for f in ic_launcher ic_launcher_round ic_launcher_foreground; do
+              convert ../icons/icon-512.png -resize ${z}x${z} $R/mipmap-$n/$f.png || true
+            done
+          done
+          mkdir -p ~/.android
+          test -n "$KEYSTORE_B64" || { echo "Falta el secreto KEYSTORE_B64"; exit 1; }
+          echo "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Elite-Pool-APK
+          path: build/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
