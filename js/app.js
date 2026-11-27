@@ -1,10 +1,10 @@
 /* Elite Pool Service PR — PWA (sin dependencias). Estado local en IndexedDB, funciona offline. */
 'use strict';
 
-const APP_VERSION = 'v48 · Ruta de ayer';
+const APP_VERSION = 'v50 · Ajustes, reportes y recibos';
 const API_URL = null; // pon aquí la URL de tu backend para sincronizar de verdad (ver README)
 const COL = { water: '#0284c7', ok: '#10b981', warn: '#f59e0b', bad: '#ef4444', pending: '#94a3b8' };
-const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Mensajes']];
+const TABS = [['routes', '📍', 'Rutas'], ['clients', '👥', 'Clientes'], ['chem', '🧪', 'Químicos'], ['orders', '📋', 'Órdenes'], ['shop', '🛒', 'Compras'], ['invoices', '🧾', 'Facturas'], ['msg', '⚙️', 'Ajustes']];
 
 const S = { lock: null, db: null, queue: [], lastSync: null, settings: mergeSettings(null), demoPurged: false, lastBackup: null };
 const UI = {
@@ -39,7 +39,7 @@ async function makeSnap(force) {
   } catch (e) { /* nada */ }
 }
 let persistTimer = null, snapAt = 0;
-const persist = () => { if (S.loadFailed) return; clearTimeout(persistTimer); persistTimer = setTimeout(() => idbSet('state', { db: S.db, queue: S.queue, lastSync: S.lastSync, settings: S.settings, demoPurged: S.demoPurged, lastBackup: S.lastBackup, lock: S.lock }).then(() => { if (Date.now() - snapAt > 20 * 60e3) { snapAt = Date.now(); makeSnap(true); } }).catch(() => {}), 300); };
+const persist = () => { if (S.loadFailed) return; scheduleNotifs(); clearTimeout(persistTimer); persistTimer = setTimeout(() => idbSet('state', { db: S.db, queue: S.queue, lastSync: S.lastSync, settings: S.settings, demoPurged: S.demoPurged, lastBackup: S.lastBackup, lock: S.lock }).then(() => { if (Date.now() - snapAt > 20 * 60e3) { snapAt = Date.now(); makeSnap(true); } }).catch(() => {}), 300); };
 
 /* ---------- mutaciones + cola de sincronización ---------- */
 let renderQueued = false;
@@ -321,6 +321,55 @@ function pausedNote(date) {
   const ps = activeProps().filter((p) => (p.service_days || []).includes(dow(date)) || (p.dates || []).some((x) => x.d === date)).filter((p) => isPaused(p, date));
   return ps.length ? muted('⏸ En pausa ese día: ' + esc(ps.map((p) => clientName(p.client_id) + ' — ' + p.address).join(' · ')), 'mt-s') : '';
 }
+
+/* ---------- Resumen del día, aviso diario, WhatsApp de la ruta y guardado al terminar ---------- */
+const padN = (n) => String(n).padStart(2, '0');
+function dayProps(iso) {
+  const route = T('routes').find((r) => r.date === iso && r.technician_id === ME), out = [], seen = new Set();
+  const add = (p) => { if (p && !seen.has(p.id)) { seen.add(p.id); out.push(p); } };
+  if (route) routeStops(route).filter((s) => s.status !== 'SKIPPED').forEach((s) => add(find('properties', s.property_id)));
+  scheduledProps(iso).forEach(add);
+  return out;
+}
+const propLine = (p, i) => `${i + 1}. ${clientName(p.client_id)} — ${p.address}${p.municipality ? ', ' + p.municipality : ''}`;
+function routeText(iso) {
+  const ps = dayProps(iso);
+  if (!ps.length) return '';
+  return `🏊 *Ruta del ${DAYS[dow(iso)]} ${fmtDate(iso)}* — ${ps.length} piscina(s)\n\n` + ps.map(propLine).join('\n');
+}
+let notifTimer = null;
+function scheduleNotifs() { clearTimeout(notifTimer); notifTimer = setTimeout(doScheduleNotifs, 1500); }
+async function doScheduleNotifs() {
+  const N = window.EP_NATIVE; if (!N || !S.db || S.loadFailed) return;
+  try {
+    const n = S.settings.notify || {};
+    if (!n.on) { await N.cancelAll(); return; }
+    const [hh, mm] = String(n.time || '05:00').split(':').map(Number), now = Date.now(), list = [];
+    for (let i = 0; i < 14; i++) {
+      const iso = addDays(todayISO(), i), at = new Date(`${iso}T${padN(hh || 0)}:${padN(mm || 0)}:00`);
+      if (at.getTime() <= now + 5000) continue;
+      const ps = dayProps(iso); if (!ps.length) continue;
+      list.push({ id: 1000 + i, at: at.toISOString(), title: `🏊 Hoy: ${ps.length} piscina${ps.length === 1 ? '' : 's'}`, body: ps.map(propLine).join('\n') });
+    }
+    const r = await N.schedule(list);
+    if (r === 'denied' && !UI.notifWarned) { UI.notifWarned = true; toast('Activa el permiso de notificaciones para esta app en los ajustes de Android'); }
+  } catch (e) { /* nada */ }
+}
+function notifCard() {
+  const n = S.settings.notify || {}, nat = !!window.EP_NATIVE;
+  return `<h2>🔔 Aviso diario de la ruta</h2><div class="card">${nat ? `<div style="font-weight:700;color:${n.on ? COL.ok : COL.warn}">${n.on ? 'Activado' : 'Desactivado'}</div>
+    ${fld('Hora del aviso', `<input type="time" data-setv="notify.time" value="${esc(n.time || '05:00')}">`)}
+    <div class="btns">${btn(n.on ? 'Desactivar aviso' : 'Activar aviso', 'toggleNotify', {}, n.on ? 'ghost' : '')}${btn('Probar ahora', 'testNotify', {}, 'ghost')}</div>
+    ${muted('Cada día a esa hora te avisa cuántas piscinas tienes y las direcciones. El aviso se prepara con la ruta de los próximos 14 días cada vez que cambias algo en la app.', 'mt-s')}` : muted('El aviso diario funciona en la app instalada (APK). Aquí en el navegador no está disponible.')}</div>`;
+}
+async function autoSaveEnd() {
+  try {
+    await makeSnap(true);
+    const N = window.EP_NATIVE; let where = '';
+    if (N && N.saveFile) where = await N.saveFile(`respaldo-elite-pool-${todayISO()}.json`, await backupBlob().text());
+    toast(where ? '✅ Ruta terminada: copia guardada en el teléfono' : '✅ Ruta terminada: copia interna guardada');
+  } catch (e) { /* nada */ }
+}
 function routesTab() {
   const wk = addDays(routeDate(), -dow(routeDate()));
   autoRoutes(Array.from({ length: 7 }, (_, i) => addDays(wk, i)).concat([routeDate()]));
@@ -340,15 +389,15 @@ function routesTab() {
   const inRoute = new Set(stops.map((s) => s.property_id));
   const missing = scheduledProps(date).filter((p) => !inRoute.has(p.id));
   let h = backupBanner() + (isToday ? carryHtml() : '') + weekStrip() + `<div class="progress"><i style="width:${stops.length ? (done / stops.length) * 100 : 0}%"></i></div>${mapHtml(stops)}`;
-  h += `<div class="btns" style="margin:0 0 12px">${btn('↕ Optimizar ruta', 'optimize', {}, 'sm ghost')}${url ? `<a class="btn sm ghost" href="${esc(url)}" target="_blank" rel="noopener">🗺 Abrir en Mapas</a>` : ''}${stops.some((s) => s.status === 'PENDING') ? btn('↪ Pasar pendientes a otro día', 'moveSheet', { ids: stops.filter((s) => s.status === 'PENDING').map((s) => s.id).join(',') }, 'sm ghost') : ''}</div>`;
+  h += `<div class="btns" style="margin:0 0 12px">${btn('↕ Optimizar ruta', 'optimize', {}, 'sm ghost')}${url ? `<a class="btn sm ghost" href="${esc(url)}" target="_blank" rel="noopener">🗺 Abrir en Mapas</a>` : ''}${btn('📲 Enviarme la ruta', 'sendRouteWa', {}, 'sm ghost')}${stops.some((s) => s.status === 'PENDING') ? btn('↪ Pasar pendientes a otro día', 'moveSheet', { ids: stops.filter((s) => s.status === 'PENDING').map((s) => s.id).join(',') }, 'sm ghost') : ''}</div>`;
   h += pausedNote(date) ? `<div class="mb">${pausedNote(date)}</div>` : '';
   if (missing.length) h += `<div class="mb">${btn(`+ Añadir ${missing.length} propiedad(es) programadas que faltan`, 'addMissing', {}, 'ghost')}</div>`;
   h += '<div class="cols">' + stops.map((s) => {
     const p = find('properties', s.property_id), c = p && find('clients', p.client_id);
     if (!p || !c) return '';
-    const actions = s.status === 'PENDING' ? `<div class="btns">${btn('▶ Iniciar parada', 'startStop', { id: s.id })}${btn('↪ Otro día', 'moveSheet', { ids: s.id }, 'ghost')}</div>`
+    const actions = s.status === 'PENDING' ? `<div class="btns">${btn('▶ Iniciar parada', 'startStop', { id: s.id })}${btn('💬 En camino', 'otw', { id: s.id }, 'ghost')}${btn('↪ Otro día', 'moveSheet', { ids: s.id }, 'ghost')}</div>`
       : s.status === 'IN_PROGRESS' ? `<div class="btns">${btn('Abrir', 'openStop', { id: s.id }, 'ghost')}${btn('✓ Completar', 'completeStop', { id: s.id, send: '0' }, 'ok')}</div>`
-      : btn('📤 Enviar informe', 'sendStop', { id: s.id }, 'sm ghost');
+      : `<div class="btns">${btn('📤 Enviar informe', 'sendStop', { id: s.id }, 'sm ghost')}${btn('↩ Reabrir', 'reopenStop', { id: s.id }, 'sm ghost')}</div>`;
     return `<div class="card bar tap" style="border-left-color:${ST_COLOR[s.status]}" data-act="openStop" data-id="${s.id}">
       <div class="row"><div class="dot" style="position:static;margin:0;background:${ST_COLOR[s.status]}">${s.order_index + 1}</div>
       <div class="grow"><b>${esc(c.name)}</b>${muted(esc(p.address + ', ' + p.municipality))}${muted('Días: ' + esc(propDaysText(p)))}${(dateEntry(p, routeDate()) || {}).t ? `<div class="stamp" style="font-weight:700;color:${COL.water}">🕒 Servicio a las ${fmtHM(dateEntry(p, routeDate()).t)}</div>` : ''}</div>${badge(ST_LABEL[s.status], ST_COLOR[s.status])}</div>
@@ -410,7 +459,7 @@ function stopView(id) {
     <div class="fld mt-s">${input('part_name', '', 'placeholder="Ej. O-ring de la tapa de la bomba"')}</div>${btn('+ Requerir pieza', 'addPart', { stop: stop.id }, 'sm ghost')}</div>`;
   const footer = stop.status === 'PENDING' ? btn('▶ Iniciar parada (Check-In GPS)', 'startStop', { id: stop.id })
     : stop.status === 'IN_PROGRESS' ? btn('✓ Completar y enviar (1 toque)', 'completeStop', { id: stop.id, send: '1' }, 'ok') + btn('Completar sin enviar', 'completeStop', { id: stop.id, send: '0' }, 'ghost')
-    : btn('📤 Enviar informe al cliente', 'sendStop', { id: stop.id });
+    : btn('📤 Enviar informe al cliente', 'sendStop', { id: stop.id }) + btn('↩ Reabrir servicio (corregir)', 'reopenStop', { id: stop.id }, 'ghost');
   return { title: client.name, body: h, footer };
 }
 
@@ -449,6 +498,7 @@ function clientView(id) {
   if (!c) return { title: '—', body: empty('Cliente no encontrado.') };
   let h = `<div class="card"><div>📞 ${esc(c.phone || '—')}</div><div>✉️ ${esc(c.email || '—')}</div><div>💵 ${feeLabel(c)}</div>${pauseActive(c.pause) ? `<div class="mt-s"><b style="color:${COL.warn}">${esc(pauseLabel(c.pause))}</b></div>` : ''}<div class="mt-s">${btn(pauseActive(c.pause) ? '⏸ Editar pausa del cliente' : '⏸ Pausar servicio', 'pauseSheet', { t: 'c', id: c.id }, 'sm ghost')}</div><div class="mt-s">${seg(c.fee_type || 'MONTHLY', [['MONTHLY', 'Cobro mensual'], ['PER_SERVICE', 'Por servicio']], 'setPref', { id: c.id, f: 'fee_type' })}</div>${c.notes ? muted(esc(c.notes), 'mt-s') : ''}${c.tags.length ? muted('Etiquetas: ' + esc(c.tags.join(', ')), 'mt-s') : ''}</div>
     ${pendingCard(c)}
+    <div class="mb">${btn('📄 Estado de cuenta (PDF / WhatsApp)', 'statementSheet', { id: c.id }, 'ghost')}</div>
     ${photosCard(c)}
     ${payCard(c)}
     <h2>Informe al cliente</h2><div class="card"><div class="chk"><span class="t">Mostrar hora de llegada y salida en el informe</span><label class="sw"><input type="checkbox" data-cflag="hide_times" data-id="${c.id}"${c.hide_times ? '' : ' checked'}><i></i></label></div>${muted('Las horas siempre quedan guardadas en tu registro; esto solo decide si salen en el PDF y el texto que le envías a este cliente.')}</div>
@@ -735,9 +785,27 @@ function autoInvoices() {
   const n = targets.filter(createInvoiceFor).length;
   if (n) { persist(); toast(`Se crearon ${n} factura(s) de ${period} como borrador (hoy fue el último servicio del mes). Revísalas en Facturas.`); }
 }
+
+/* =====================================================================
+   Reportes: ganancia por cliente, millaje y químicos por piscina
+   ===================================================================== */
+function reportsTab() {
+  const per = UI.repPer || 'month', [from, to] = reportRange(per, todayISO()), mi = S.settings.mileage || {};
+  const P = profitReport(S.db, from, to), M = mileageReport(S.db, from, to, toNum(mi.extraMi) || 0, toNum(mi.rate) || 0), C = chemUsageReport(S.db, from, to);
+  let h = invModeSeg() + `<div class="mt"></div>${seg(per, [['month', 'Este mes'], ['last', 'Mes pasado'], ['year', 'Año']], 'setRepPer')}${muted(`${fmtDate(from)} al ${fmtDate(to)}`, 'mt-s')}`;
+  h += `<h2>💰 Ganancia por cliente</h2><div class="card"><div class="row between"><span>Facturado</span><b>${money(P.income)}</b></div><div class="row between"><span>Químicos comprados (recibos)</span><b>${money(P.chem)}</b></div><div class="row between"><span>Visitas hechas</span><b>${P.visits}</b></div>${muted(P.visits ? `El gasto en químicos se reparte por visita (≈ ${money(P.perVisit)} cada una). Es un estimado: sirve para comparar clientes, no es contabilidad.` : 'Aún no hay visitas completadas en este periodo.', 'mt-s')}</div>`;
+  h += P.rows.length ? P.rows.map((r) => `<div class="card bar" style="border-left-color:${r.profit < 0 ? COL.bad : COL.ok}"><div class="row between"><b>${esc(r.name)}</b><b style="color:${r.profit < 0 ? COL.bad : COL.ok}">${money(r.profit)}</b></div>${muted(`Facturado ${money(r.income)} · ${r.visits} visita(s) · químicos ≈ ${money(r.cost)}${r.perHour != null ? ` · ${money(r.perHour)} por hora en sitio` : ''}`)}</div>`).join('') : empty('Sin facturas ni visitas en este periodo.');
+  h += `<h2>🚗 Millaje</h2><div class="card"><div class="g2">${fld('Millas extra por día de trabajo (casa ↔ ruta)', `<input data-setv="mileage.extraMi" inputmode="decimal" value="${esc(mi.extraMi || '')}" placeholder="0">`)}${fld('Tarifa por milla ($)', `<input data-setv="mileage.rate" inputmode="decimal" value="${esc(mi.rate || '')}" placeholder="Opcional">`)}</div>${btn('↻ Recalcular', 'repRefresh', {}, 'sm ghost')}
+    <div class="row between mt"><span>Total del periodo</span><b>${M.mi.toLocaleString('es-PR')} mi · ${M.km.toLocaleString('es-PR')} km</b></div>${M.deduction != null ? `<div class="row between"><span>Deducción estimada</span><b>${money(M.deduction)}</b></div>` : ''}
+    ${M.days.length ? `<div class="mt-s">${M.days.map((d) => `<div class="row between" style="padding:4px 0;border-bottom:1px solid var(--border)"><span>${fmtDate(d.date)} · ${d.stops} parada(s)</span><b>${d.mi.toLocaleString('es-PR')} mi</b></div>`).join('')}</div>` : muted('Sin rutas completadas en este periodo.', 'mt-s')}
+    ${muted('Se calcula con la distancia entre las paradas en el orden de la ruta (con un ajuste por calles). Es un estimado: para deducir el vehículo confirma el método con tu contador.', 'mt-s')}</div>`;
+  h += `<h2>🧪 Químicos aplicados por piscina</h2>` + (C.length ? C.map((p) => `<div class="card"><b>${esc(p.label)}</b>${p.items.map((i) => `<div class="row between" style="padding:3px 0"><span>${esc(i.name)}</span><b>${i.amount.toLocaleString('es-PR')} ${esc(i.unit)}</b></div>`).join('')}</div>`).join('') : empty('Aún no hay dosis aplicadas en este periodo. Se llenan al tocar «Aplicar» en las dosis sugeridas de cada parada.'));
+  return { title: 'Reportes', sub: 'Ganancia, millaje y químicos', body: h };
+}
 function invoicesTab() {
   if (UI.invMode === 'quotes') return quotesTab();
   if (UI.invMode === 'expenses') return expensesTab();
+  if (UI.invMode === 'reports') return reportsTab();
   const period = todayISO().slice(0, 7);
   const list = T('invoices').filter((i) => UI.invFilter === 'ALL' || invView(i) === UI.invFilter).sort((a, b) => b.created_at.localeCompare(a.created_at));
   const owed = T('invoices').reduce((s, i) => s + invBalance(i, S.db), 0), paid = T('invoices').reduce((s, i) => s + (i.status === 'PAID' ? i.total_amount : invPaid(i, S.db)), 0);
@@ -851,7 +919,17 @@ async function loadOcr() {
   if (window.Tesseract) return;
   await new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js'; s.onload = res; s.onerror = () => rej(new Error('No se pudo descargar el lector')); document.head.appendChild(s); setTimeout(() => rej(new Error('Tiempo agotado')), 45000); });
 }
+async function ocrNative(file, onProg) {
+  onProg('Leyendo el texto con el lector de Android…');
+  let bmp; try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch (e) { bmp = await createImageBitmap(file); }
+  const sc = Math.min(1, 2200 / Math.max(bmp.width, bmp.height)), cv = document.createElement('canvas');
+  cv.width = Math.round(bmp.width * sc); cv.height = Math.round(bmp.height * sc);
+  cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+  const b64 = cv.toDataURL('image/jpeg', 0.92).split(',')[1];
+  return rowsFromBoxes(await window.EP_NATIVE.ocr(b64));
+}
 async function ocrImage(file, onProg) {
+  if (window.EP_NATIVE && window.EP_NATIVE.ocr) { try { const t = await ocrNative(file, onProg); if (t && t.trim().length > 15) return t; } catch (e) { /* si falla, usa el lector de internet */ } }
   await loadOcr();
   let bmp; try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch (e) { bmp = await createImageBitmap(file); }
   const sc = Math.min(1, 1800 / Math.max(bmp.width, bmp.height)), cv = document.createElement('canvas');
@@ -865,7 +943,7 @@ async function ocrImage(file, onProg) {
   return r.data.text || '';
 }
 async function scanReceipt(file) {
-  openSheet('📷 Leyendo recibo', '<div id="ocrmsg" class="big" style="font-size:16px">Preparando…</div>' + muted('La primera vez descarga el lector (varios MB) y necesita internet. Puede tardar un minuto.', 'mt-s'));
+  openSheet('📷 Leyendo recibo', '<div id="ocrmsg" class="big" style="font-size:16px">Preparando…</div>' + muted('En la app instalada usa el lector de Android (sin internet). En el navegador descarga un lector la primera vez: necesita internet y puede tardar un minuto.', 'mt-s'));
   const say = (m) => { const e = document.getElementById('ocrmsg'); if (e) e.textContent = m; };
   let photo = null, text = '', note = '';
   try { photo = await processRef(file, 1400); } catch (e) { closeSheet(); return alert('No se pudo leer la imagen: ' + e.message); }
@@ -914,7 +992,8 @@ function msgTab() {
   h += rec.length ? rec.map((c) => `<div class="card"><div class="row"><div class="grow"><b>${M.sent[c.id] ? '✅ ' : ''}${esc(c.name)}</b>${muted(esc(prefText(c).split(' · ')[0]))}</div>${btn(M.sent[c.id] ? 'Reenviar' : 'Enviar', 'sendBroadcast', { id: c.id }, 'sm' + (M.sent[c.id] ? ' ghost' : ''))}</div></div>`).join('') : empty('Ningún cliente activo coincide con esta audiencia.');
   h += muted('El teléfono abre WhatsApp / Correo con el mensaje listo para cada cliente; hay que tocar «enviar» en cada uno.');
   const log = [...T('dispatchLog')].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 8);
-  h += '<h2>Últimos envíos</h2>' + (log.length ? log.map((l) => `<div class="card"><b>${esc(l.who || clientName(l.client_id))}</b>${muted(`${{ REPORT: 'Informe', INVOICE: 'Factura', BROADCAST: 'Aviso', QUOTE: 'Cotización' }[l.kind]} · ${l.channel} · ${l.format} · ${fmtDateTime(l.at)}`)}</div>`).join('') : empty('Aún no hay envíos registrados.'));
+  h += '<h2>Últimos envíos</h2>' + (log.length ? log.map((l) => `<div class="card"><b>${esc(l.who || clientName(l.client_id))}</b>${muted(`${{ REPORT: 'Informe', INVOICE: 'Factura', BROADCAST: 'Aviso', QUOTE: 'Cotización', STATEMENT: 'Estado de cuenta' }[l.kind]} · ${l.channel} · ${l.format} · ${fmtDateTime(l.at)}`)}</div>`).join('') : empty('Aún no hay envíos registrados.'));
+  h += notifCard();
   h += `<h2>💾 Respaldo de datos</h2><div class="card">Tus datos viven solo en este teléfono. Guarda un respaldo seguido (y súbelo a Drive o envíatelo por WhatsApp/correo).
     <div class="mt-s" style="font-weight:700;color:${backupStale() ? COL.warn : COL.ok}">${S.lastBackup ? 'Último respaldo: ' + fmtDateTime(S.lastBackup) : 'Aún no has hecho ningún respaldo'}</div>
     <div class="mt-s"></div>${btn('💾 Guardar respaldo en el teléfono', 'backupJson')}<div class="mt-s"></div>${btn('📤 Enviar / guardar en Drive o WhatsApp', 'shareBackup', {}, 'ghost')}<div class="mt-s"></div>${btn('📊 Exportar a Excel (.xlsx)', 'exportXlsx', {}, 'ghost')}
@@ -925,7 +1004,18 @@ function msgTab() {
     <h2>Sistema y sincronización</h2><div class="card"><b style="color:${online() ? COL.ok : COL.warn}">${online() ? '● En línea' : '● Modo offline'}</b>${muted(`${S.queue.length} cambio(s) pendientes · Última sincronización: ${S.lastSync ? fmtDateTime(S.lastSync) : 'nunca'}`)}
     <div class="row between mt"><span>Simular modo sin conexión (prueba)</span><label class="sw"><input type="checkbox" data-sim="1"${UI.simOffline ? ' checked' : ''}><i></i></label></div>
     <div class="mt"></div>${btn(UI.syncing ? 'Sincronizando…' : 'Sincronizar ahora', 'syncNow', {}, 'ghost')}${muted('Versión de la app: '+APP_VERSION,'mt-s')}${UI.installEvt ? '<div class="mt-s"></div>' + btn('📲 Instalar app en este teléfono', 'install', {}, 'dark') : ''}</div>`;
-  return { title: 'Mensajería', sub: 'Envío híbrido, avisos masivos y sincronización', body: h };
+  const SET_TABS = [['negocio', '🏢', 'Negocio'], ['facturas', '🧾', 'Facturas'], ['cotiz', '📝', 'Cotizaciones'], ['informe', '📄', 'Informes'], ['quimicos', '🧪', 'Químicos'], ['mensajes', '💬', 'Mensajes'], ['avisos', '🔔', 'Avisos'], ['respaldo', '💾', 'Respaldo'], ['sistema', '⚙️', 'Sistema']];
+  const groups = pdfGroups();
+  h.split(/(?=<h2)/).forEach((part) => {
+    const t = part.replace(/<[^>]+>/g, '').slice(0, 30);
+    const k = /^Documentos PDF/.test(t) ? null : /Motor|Aviso masivo|Últimos envíos/.test(t) ? 'mensajes' : /Aviso diario/.test(t) ? 'avisos' : /Respaldo/.test(t) ? 'respaldo' : /Clave|Sistema/.test(t) ? 'sistema' : null;
+    if (k) groups[k] = (groups[k] || '') + part;
+  });
+  const st = SET_TABS.some((x) => x[0] === UI.setTab) ? UI.setTab : 'negocio';
+  let out = `<div class="chips mb">${SET_TABS.map(([k, i, l]) => chip(i + ' ' + l, st === k, 'setTab', { v: k })).join('')}</div>` + (groups[st] || '');
+  if (st === 'facturas') out += `<div class="btns mt">${btn('👁 Ver factura de ejemplo', 'previewPdf', { kind: 'invoice' }, 'ghost')}</div>`;
+  if (st === 'informe') out += `<div class="btns mt">${btn('👁 Ver informe de ejemplo', 'previewPdf', { kind: 'report' }, 'ghost')}</div>`;
+  return { title: 'Ajustes', sub: SET_TABS.find((x) => x[0] === st)[2], body: out };
 }
 
 /* =====================================================================
@@ -978,7 +1068,7 @@ const INV_OPTS = [['logo', 'Logo'], ['showName', 'Nombre del negocio junto al lo
 const REP_OPTS = [['logo', 'Logo'], ['showName', 'Nombre del negocio junto al logo (apágalo si tu logo ya trae el nombre)'], ['bizInfo', 'Datos del negocio'], ['clientBlock', 'Datos del cliente y visita'], ['times', 'Hora de entrada y salida'], ['tech', 'Nombre del técnico'], ['readings', 'Tabla de lecturas químicas'], ['ideal', 'Rango ideal'], ['previous', 'Lectura de la visita anterior'], ['summary', 'Resumen de alertas'], ['doses', 'Productos químicos aplicados'], ['equipment', 'Equipos de la piscina'], ['checklist', 'Trabajo realizado'], ['notes', 'Observaciones'], ['parts', 'Piezas requeridas'], ['photos', 'Fotos antes / después'], ['footer', 'Pie de página']];
 const getPath = (o, path) => path.split('.').reduce((a, k) => (a ? a[k] : undefined), o);
 const setPath = (o, path, v) => { const ks = path.split('.'), last = ks.pop(); let t = o; ks.forEach((k) => { t = t[k]; }); t[last] = v; };
-function pdfView() {
+function pdfParts() {
   const st = S.settings, tgl = (grp, list) => list.map(([k, l]) => `<div class="chk"><span class="t">${esc(l)}</span><label class="sw"><input type="checkbox" data-set="${grp}.${k}"${st[grp][k] ? ' checked' : ''}><i></i></label></div>`).join('');
   const tx = (path, label, ph = '') => fld(label, `<input data-setv="${path}" value="${esc(getPath(st, path) || '')}" placeholder="${esc(ph)}">`);
   const body = `<h2>Logo</h2><div class="card">${st.logo ? `<div style="background:#fff;border:1px solid var(--border);border-radius:12px;padding:10px;text-align:center"><img src="${st.logo.data}" alt="Logo" style="max-width:100%;max-height:110px"></div><div class="btns"><label class="btn sm ghost">Cambiar logo<input type="file" accept="image/*" hidden data-logo="1"></label>${btn('Quitar', 'delLogo', {}, 'sm danger')}</div>` : `${muted('Sube tu logo (PNG o JPG). Se reduce y se guarda en el teléfono.')}<div class="mt-s"></div><label class="btn">📷 Subir logo<input type="file" accept="image/*" hidden data-logo="1"></label>`}
@@ -1001,20 +1091,36 @@ function pdfView() {
     ${fld('Texto del pie', `<input data-setv="report.footerText" value="${esc(st.report.footerText)}">`)}</div>
     ${btn('Restaurar opciones originales', 'resetPdf', {}, 'sm ghost')}`;
   const footer = `<div class="btns" style="margin-top:0">${btn('👁 Factura', 'previewPdf', { kind: 'invoice' })}${btn('👁 Informe', 'previewPdf', { kind: 'report' }, 'ghost')}</div>`;
-  return { title: 'Ajustes, equipo y PDF', body, footer };
+  return { body, footer };
 }
+function pdfGroups() {
+  const g = { negocio: '', facturas: '', cotiz: '', informe: '', quimicos: '' }; let cur = 'negocio';
+  pdfParts().body.split(/(?=<h2)/).forEach((part) => {
+    const t = part.replace(/<[^>]+>/g, '').slice(0, 45);
+    if (/^Logo|Equipo de trabajo|Datos del negocio/.test(t)) cur = 'negocio';
+    else if (/Productos químicos|Valores meta/.test(t)) cur = 'quimicos';
+    else if (/ATH|Plantilla|Distribución|Recibo de pago|Factura — qué incluir/.test(t)) cur = 'facturas';
+    else if (/Cotizaciones/.test(t)) cur = 'cotiz';
+    else if (/Informe de servicio/.test(t)) cur = 'informe';
+    g[cur] += part;
+  });
+  return g;
+}
+function pdfView() { const p = pdfParts(); return { title: 'Ajustes, equipo y PDF', ...p }; }
 
 /* =====================================================================
    Cotizaciones
    ===================================================================== */
 const Q_COLOR = { DRAFT: COL.pending, SENT: COL.water, APPROVED: COL.ok, REJECTED: COL.bad, EXPIRED: COL.warn };
-const invModeSeg = () => seg(UI.invMode || 'invoices', [['invoices', '🧾 Facturas'], ['quotes', '📝 Cotizaciones'], ['expenses', '💸 Gastos']], 'setInvMode');
+const invModeSeg = () => seg(UI.invMode || 'invoices', [['invoices', '🧾 Facturas'], ['quotes', '📝 Cotizaciones'], ['expenses', '💸 Gastos'], ['reports', '📊 Reportes']], 'setInvMode');
 function quotesTab() {
   const f = UI.qFilter || 'ALL', all = T('quotes');
   const list = all.filter((q) => f === 'ALL' || quoteStatus(q) === f).sort((a, b) => b.created_at.localeCompare(a.created_at));
   const sum = (arr) => arr.reduce((s, q) => s + quoteTotals(q).total, 0);
   const pend = all.filter((q) => ['DRAFT', 'SENT'].includes(quoteStatus(q))), won = all.filter((q) => q.status === 'APPROVED');
-  let h = invModeSeg() + `<div class="row mb mt"><div class="card grow" style="margin:0">${muted('Pendientes (' + pend.length + ')')}<div class="big" style="color:${COL.water}">${money(sum(pend))}</div></div><div class="card grow" style="margin:0">${muted('Aprobadas (' + won.length + ')')}<div class="big" style="color:${COL.ok}">${money(sum(won))}</div></div></div>
+  const daysAgo = (iso) => Math.floor((Date.now() - new Date(iso).getTime()) / 864e5);
+  const follow = all.filter((q) => quoteStatus(q) === 'SENT' && daysAgo(q.sent_at || q.created_at) >= 3 && !(q.last_followup && daysAgo(q.last_followup + 'T12:00:00') < 3));
+  let h = invModeSeg() + (follow.length ? `<div class="card" style="border-left:6px solid ${COL.warn}"><b>⏰ Dar seguimiento (${follow.length})</b>${muted('Cotizaciones enviadas hace 3 días o más sin respuesta.', 'mb')}${follow.map((q) => { const w = quoteWho(q, S.db); return `<div class="row between" style="padding:6px 0;border-top:1px solid var(--border)"><div class="grow"><b>${esc(w.name)}</b>${muted(`${esc(q.number)} · ${money(quoteTotals(q).total)} · hace ${daysAgo(q.sent_at || q.created_at)} días`)}</div>${btn('💬 Seguimiento', 'followQuote', { id: q.id }, 'sm')}</div>`; }).join('')}</div>` : '') + `<div class="row mb mt"><div class="card grow" style="margin:0">${muted('Pendientes (' + pend.length + ')')}<div class="big" style="color:${COL.water}">${money(sum(pend))}</div></div><div class="card grow" style="margin:0">${muted('Aprobadas (' + won.length + ')')}<div class="big" style="color:${COL.ok}">${money(sum(won))}</div></div></div>
     ${btn('📋 Catálogo de servicios y precios', 'openCatalog', {}, 'ghost')}<div class="mt-s"></div>${btn('📦 Catálogo de equipos (bombas, calentadores…)', 'openEquip', {}, 'ghost')}<div class="mt-s"></div>${btn('💧 Precio por galones', 'openTiers', {}, 'ghost')}<div class="mt-s"></div>${btn('🛟 Copias internas de seguridad', 'openSnaps', {}, 'ghost')}<div class="mt"></div>
     <div class="chips">${chip('Todas', f === 'ALL', 'setQFilter', { v: 'ALL' })}${Object.keys(QUOTE_LABEL).map((s) => chip(QUOTE_LABEL[s], f === s, 'setQFilter', { v: s }, Q_COLOR[s])).join('')}</div>`;
   h += list.length ? '<div class="cols">' + list.map((q) => { const st = quoteStatus(q), w = quoteWho(q, S.db); return `<div class="card bar tap" style="border-left-color:${Q_COLOR[st]}" data-act="openQuote" data-id="${q.id}"><div class="row between"><b>${esc(w.name)}${q.client_id ? '' : ' <span class="muted">(prospecto)</span>'}</b>${badge(QUOTE_LABEL[st], Q_COLOR[st])}</div>${muted(esc(q.number) + ' · vigencia ' + fmtDate(q.valid_until))}<div class="amount mt-s">${money(quoteTotals(q).total)}</div></div>`; }).join('') + '</div>'
@@ -1283,6 +1389,18 @@ function saveDates(p, dates) { upsert('properties', { ...p, dates: dates.sort((a
 
 const A = {
   noop() {},
+  statementSheet: (d) => {
+    const c = find('clients', d.id); if (!c) return;
+    openSheet('Estado de cuenta — ' + c.name, `${muted('Resumen de visitas, facturas, pagos y balance del periodo. Se envía con la preferencia de envío del cliente.')}<div class="btns mt">${btn('Este mes', 'sendStatement', { id: c.id, m: 'month' })}${btn('Mes pasado', 'sendStatement', { id: c.id, m: 'last' }, 'ghost')}${btn('Todo el año', 'sendStatement', { id: c.id, m: 'year' }, 'ghost')}</div>`);
+  },
+  sendStatement: (d) => {
+    const c = find('clients', d.id); if (!c) return;
+    const [from, to] = reportRange(d.m, todayISO());
+    closeSheet();
+    setTimeout(() => openDispatch(c.id, 'STATEMENT', buildStatementDoc(c, from, to, S.settings, S.db)), 50);
+  },
+  setRepPer: (d) => { UI.repPer = d.v; render(); },
+  repRefresh: () => render(),
   setInvMode: (d) => { UI.invMode = d.v; render(); },
   remind: (d) => {
     const dt = debtors().find((x) => x.c.id === d.id); if (!dt) return toast('Ya no tiene balance vencido');
@@ -1314,10 +1432,18 @@ const A = {
     const q = { id: old ? old.id : uid('q'), number: old ? old.number : nextQuoteNumber(S.db), client_id: Q.mode === 'client' ? Q.client_id : null, prospect: Q.mode === 'prospect' ? { name: pr.name.trim(), phone: pr.phone.trim(), email: pr.email.trim(), address: pr.address.trim() } : null, lines, discount: toNum(Q.discount) || 0, notes: Q.notes.trim(), valid_until: Q.valid_until || addDays(todayISO(), 15), status: old ? old.status : 'DRAFT', created_at: old ? old.created_at : new Date().toISOString(), order_id: old ? old.order_id : null, title: Q.title.trim(), intro: Q.intro.trim(), scope: Q.scope.trim(), freq: Q.freq.trim(), chem: Q.chem, why: Q.why };
     upsert('quotes', q); closeSheet(); go('quote', q.id);
   },
-  setQuoteStatus: (d) => upsert('quotes', { ...find('quotes', d.id), status: d.v }),
+  setQuoteStatus: (d) => upsert('quotes', { ...find('quotes', d.id), status: d.v, ...(d.v === 'SENT' ? { sent_at: new Date().toISOString() } : {}) }),
+  followQuote: (d, el, ev) => {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    const q = find('quotes', d.id), w = q && quoteWho(q, S.db); if (!q) return;
+    if (!digits(w.phone)) return alert((w.name || 'Este cliente') + ' no tiene teléfono guardado.');
+    upsert('quotes', { ...q, last_followup: todayISO() });
+    window.open(waLink(w.phone, `Hola ${String(w.name).split(' ')[0]}, le escribe ${S.settings.biz.name || 'Elite Pool Service PR'}. Le escribo para dar seguimiento a la cotización ${q.number} por ${money(quoteTotals(q).total)}. ¿Tiene alguna pregunta o desea que coordinemos para comenzar? ¡Quedo atento!`), '_blank');
+    render();
+  },
   sendQuote: (d) => {
     const q = find('quotes', d.id), w = quoteWho(q, S.db);
-    openDispatch(q.client_id || null, 'QUOTE', buildQuoteDoc(q, S.settings, S.db), { pseudo: w.client ? null : { name: w.name, phone: w.phone, email: w.email, dispatch_channel_pref: 'WHATSAPP', dispatch_format_pref: 'BOTH' }, after: () => { const cur = find('quotes', q.id); if (cur && cur.status === 'DRAFT') upsert('quotes', { ...cur, status: 'SENT' }); } });
+    openDispatch(q.client_id || null, 'QUOTE', buildQuoteDoc(q, S.settings, S.db), { pseudo: w.client ? null : { name: w.name, phone: w.phone, email: w.email, dispatch_channel_pref: 'WHATSAPP', dispatch_format_pref: 'BOTH' }, after: () => { const cur = find('quotes', q.id); if (cur && cur.status === 'DRAFT') upsert('quotes', { ...cur, status: 'SENT', sent_at: new Date().toISOString() }); } });
   },
   previewQuote: (d) => { const doc = buildQuoteDoc(find('quotes', d.id), S.settings, S.db); downloadBlob(new Blob([buildPdf(doc.title, doc.lines, doc.opts)], { type: 'application/pdf' }), doc.fileName); toast('PDF generado (revisa Descargas)'); },
   dupQuote: (d) => { const q = find('quotes', d.id), n = { ...JSON.parse(JSON.stringify(q)), id: uid('q'), number: nextQuoteNumber(S.db), status: 'DRAFT', created_at: new Date().toISOString(), valid_until: addDays(todayISO(), +S.settings.quote.validDays || 15), order_id: null }; upsert('quotes', n); go('quote', n.id); toast('Cotización duplicada'); },
@@ -1421,8 +1547,9 @@ const A = {
     const def = chemPrefs(S.settings.chem), cur = p.chem || {};
     openSheet('🧪 Productos de ' + p.address, `${muted('Elige qué productos usas en ESTA propiedad. Con «predeterminado» usa lo que pusiste en Ajustes.')}<div class="mt-s"></div>${CHEM_CATS.map((c) => fld(c.l, `<select data-pchem="${p.id}:${c.k}"><option value="">${esc('Predeterminado: ' + c.list[def[c.k]].name)}</option>${optList(Object.entries(c.list).map(([k, v]) => [k, v.name]), cur[c.k])}</select>`)).join('')}<div class="mt"></div>${btn('Listo', 'closeSheet')}`);
   },
-  openPdfSettings: () => go('pdf', 'x'),
-  openTemplates: () => { go('pdf', 'x'); setTimeout(() => { const e = document.getElementById('tpl_sec'); if (e) e.scrollIntoView(); }, 60); },
+  openPdfSettings: () => { UI.tab = 'msg'; UI.setTab = 'facturas'; UI.view = null; render(); },
+  setTab: (d) => { UI.setTab = d.v; render(); },
+  openTemplates: () => { UI.tab = 'msg'; UI.setTab = 'facturas'; UI.view = null; render(); setTimeout(() => { const e = document.getElementById('tpl_sec'); if (e) e.scrollIntoView(); }, 60); },
   viewRef: (d) => { const p = find('properties', d.id); if (p && p.photo) openSheet(esc(p.address), `<img class="refbig" src="${p.photo.uri}" alt="">`); },
   delRef: (d) => { const p = find('properties', d.id); if (p && confirm('¿Quitar la foto de esta propiedad?')) { const q = { ...p }; delete q.photo; upsert('properties', q); } },
   delLogo: () => { S.settings.logo = null; persist(); render(); },
@@ -1445,6 +1572,38 @@ const A = {
   back: () => { UI.view = null; render(); },
   closeSheet,
   install: async () => { const e = UI.installEvt; if (!e) return; e.prompt(); await e.userChoice; UI.installEvt = null; render(); },
+  sendRouteWa: () => {
+    const txt = routeText(routeDate()); if (!txt) return toast('No hay paradas en esta fecha');
+    const ph = (S.settings.biz && S.settings.biz.phone) || '';
+    window.open(digits(ph).length >= 10 ? waLink(ph, txt) : 'https://wa.me/?text=' + encodeURIComponent(txt), '_blank');
+  },
+  otw: (d, el, ev) => {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    const s = find('stops', d.id), p = s && find('properties', s.property_id), c = p && find('clients', p.client_id);
+    if (!c) return;
+    if (!digits(c.phone)) return alert(c.name + ' no tiene teléfono guardado.');
+    window.open(waLink(c.phone, `Hola ${c.name}, le escribe ${S.settings.biz.name || 'Elite Pool Service PR'}. Voy en camino a su piscina para el servicio de hoy. ¡Hasta pronto!`), '_blank');
+  },
+  reopenStop: (d, el, ev) => {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    const s = find('stops', d.id); if (!s || s.status !== 'DONE') return;
+    if (s.invoice_id && find('invoices', s.invoice_id)) return alert('Esta visita ya está en una factura. Elimina primero el borrador de la factura (o no la reabras).');
+    if (!confirm('¿Reabrir este servicio para corregirlo? Volverá a "en progreso".')) return;
+    upsert('stops', { ...s, status: 'IN_PROGRESS', check_out_time: null, completed_at: null });
+    const r = find('routes', s.route_id); if (r && r.status === 'DONE') upsert('routes', { ...r, status: 'IN_PROGRESS' });
+    toast('Servicio reabierto'); render();
+  },
+  toggleNotify: async () => {
+    const n = S.settings.notify; n.on = !n.on; persist();
+    if (n.on && window.EP_NATIVE) { const r = await window.EP_NATIVE.askPermission(); if (r !== 'ok') { n.on = false; persist(); toast('Permiso de notificaciones denegado: actívalo en los ajustes de Android'); } else toast('Aviso diario activado'); }
+    render();
+  },
+  testNotify: async () => {
+    const N = window.EP_NATIVE; if (!N) return;
+    const ps = dayProps(todayISO());
+    const r = await N.test('🏊 Prueba de aviso', ps.length ? ps.map(propLine).join('\n') : 'Así se verá tu aviso diario.');
+    toast(r === 'ok' ? 'En unos 5 segundos llega el aviso de prueba' : 'Permiso de notificaciones denegado');
+  },
   syncNow,
   backupJson: () => { downloadBlob(backupBlob(), `respaldo-elite-pool-${todayISO()}.json`); markBackup('Respaldo guardado en Descargas'); },
   shareBackup: async () => {
@@ -1540,7 +1699,7 @@ const A = {
     if (s.status !== 'DONE') {
       upsert('stops', { ...s, status: 'DONE', check_out_time: stampFor(s.route_id), completed_at: new Date().toISOString() });
       const r = curRoute();
-      if (r && routeStops(r).every((x) => x.status === 'DONE')) upsert('routes', { ...r, status: 'DONE' });
+      if (r && routeStops(r).every((x) => x.status === 'DONE')) { upsert('routes', { ...r, status: 'DONE' }); autoSaveEnd(); }
     }
     UI.view = null; render();
     if (send) A.sendStop({ id: s.id });

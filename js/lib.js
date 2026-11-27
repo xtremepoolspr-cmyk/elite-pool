@@ -298,6 +298,8 @@ const DEFAULT_SETTINGS = {
   targets: { ...DEFAULT_TARGETS },
   receipt: { ask: true, msg: 'Gracias por su pago.' },
   auto: { invoices: true, last: '' },
+  notify: { on: false, time: '05:00' },
+  mileage: { extraMi: '', rate: '' },
   report: {
     logo: false, showName: true, bizInfo: true, clientBlock: true, times: true, tech: true, readings: true, ideal: true, previous: true,
     summary: true, doses: true, equipment: false, checklist: true, notes: true, parts: true, photos: true, footer: true,
@@ -323,7 +325,7 @@ function mergeSettings(saved) {
   const out = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
   if (saved && typeof saved === 'object') {
     if (saved && Array.isArray(saved.catalog)) out.catalog = saved.catalog.filter((x) => x && x.name).map((x) => ({ name: String(x.name), price: +x.price || 0 }));
-    for (const k of ['biz', 'pay', 'invoice', 'quote', 'report', 'receipt', 'auto']) if (saved[k] && typeof saved[k] === 'object') Object.assign(out[k], saved[k]);
+    for (const k of ['biz', 'pay', 'invoice', 'quote', 'report', 'receipt', 'auto', 'notify', 'mileage']) if (saved[k] && typeof saved[k] === 'object') Object.assign(out[k], saved[k]);
     // migración: antes el código de condiciones se guardaba en invoice.terms (compartido con el interruptor de términos)
     if (saved.invoice && typeof saved.invoice.terms === 'string') { out.invoice.termsCode = TERMS.some((t) => t[0] === saved.invoice.terms) ? saved.invoice.terms : 'NET15'; out.invoice.terms = true; }
     if (out.invoice.termsText === 'Pago dentro de 15 días a partir de la fecha de emisión. Gracias por su preferencia.') out.invoice.termsText = 'Gracias por su preferencia.';
@@ -408,7 +410,7 @@ const PRICE_ANY = /-?\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|-?\d+[.,]\d{2}/g;
 const VENDORS = [[/home\s*depot/, 'Home Depot'], [/wal-?mart/, 'Walmart'], [/costco/, 'Costco'], [/sam'?s/, "Sam's Club"], [/leslie/, "Leslie's Pool Supplies"], [/pool\s*supp/, 'Pool Supply'], [/ace\s*hard/, 'Ace Hardware'], [/sherwin/, 'Sherwin-Williams'], [/kmart/, 'Kmart'], [/puma/, 'Puma'], [/shell/, 'Shell'], [/texaco/, 'Texaco'], [/gulf/, 'Gulf'], [/total\s*energ/, 'TotalEnergies'], [/lowe'?s/, "Lowe's"], [/amazon/, 'Amazon']];
 /** Lee el texto OCR de un recibo: comercio, fecha, renglones, subtotal, IVU y total. */
 function parseReceipt(text) {
-  const lines = String(text || '').split(/\r?\n/).map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const lines = String(text || '').split(/\r?\n/).map((l) => l.replace(/[ \t]{2,}/g, '  ').replace(/[\f\v]+/g, ' ').trim()).filter(Boolean);
   const out = { vendor: '', date: '', items: [], subtotal: null, tax: null, total: null, method: '' };
   const full = noAcc(lines.join('\n'));
   for (const [re, name] of VENDORS) if (re.test(full)) { out.vendor = name; break; }
@@ -437,6 +439,7 @@ function parseReceipt(text) {
     const pm = l.match(PRICE_END); if (!pm) continue;
     const amount = parseMoney(pm[1]); if (isNaN(amount)) continue;
     let desc = l.slice(0, pm.index).trim(), qty = 1;
+    const cm = l.match(/^(.*\S)\s{2,}(\d{1,3})\s{2,}\$?\s*\d+[.,]\d{2}\s*[A-Za-z]?\s*$/); if (cm) { desc = cm[1].trim(); qty = +cm[2] || 1; }
     const allp = desc.match(PRICE_ANY);
     if (allp) { const unit = parseMoney(allp[allp.length - 1]); desc = desc.replace(PRICE_ANY, ' ').trim().replace(/\s+(\d{1,2}\s*[xX@]?|[xX@])$/, ''); if (unit > 0 && Math.abs(unit * Math.round(amount / unit) - amount) < 0.011 && Math.round(amount / unit) > 1) qty = Math.round(amount / unit); }
     const qm = desc.match(/^(\d{1,2})\s*[xX@]\s+/); if (qm) { qty = +qm[1]; desc = desc.slice(qm[0].length); }
@@ -1219,6 +1222,91 @@ function buildReceiptDoc(client, pay, cfgIn, db) {
   };
 }
 
+
+/** Une las líneas de texto con sus cajas (OCR nativo) en renglones: nombre ... cantidad ... precio quedan en la misma fila. */
+function rowsFromBoxes(lines) {
+  const L = (lines || []).filter((x) => x && x.text && String(x.text).trim()).map((x) => ({ t: String(x.text).trim(), l: +x.left || 0, r: +x.right || 0, cy: ((+x.top || 0) + (+x.bottom || 0)) / 2, h: Math.max(1, (+x.bottom || 0) - (+x.top || 0)) }));
+  if (!L.length) return '';
+  const hs = L.map((x) => x.h).sort((p, q) => p - q), med = hs[Math.floor(hs.length / 2)];
+  L.sort((p, q) => p.cy - q.cy);
+  const rows = [];
+  L.forEach((x) => { const row = rows[rows.length - 1]; if (row && Math.abs(x.cy - row.cy) < med * 0.6) { row.items.push(x); row.cy = row.items.reduce((s, i) => s + i.cy, 0) / row.items.length; } else rows.push({ cy: x.cy, items: [x] }); });
+  return rows.map((r) => r.items.sort((p, q) => p.l - q.l).map((i) => i.t).join('  ')).join('\n');
+}
+
+/* ---------- reportes: ganancia, millaje, químicos y estado de cuenta ---------- */
+const monthRange = (iso) => { const [y, m] = iso.split('-').map(Number), n = new Date(y, m, 0).getDate(); return [`${iso.slice(0, 7)}-01`, `${iso.slice(0, 7)}-${String(n).padStart(2, '0')}`]; };
+const prevMonthISO = (iso) => { const [y, m] = iso.split('-').map(Number), d = new Date(y, m - 2, 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`; };
+function reportRange(mode, today) {
+  if (mode === 'last') return monthRange(prevMonthISO(today));
+  if (mode === 'year') return [`${today.slice(0, 4)}-01-01`, `${today.slice(0, 4)}-12-31`];
+  return monthRange(today);
+}
+function doneStopsIn(db, from, to) {
+  const rd = new Map(db.routes.map((r) => [r.id, r.date]));
+  return db.stops.filter((s) => s.status === 'DONE' && rd.get(s.route_id) >= from && rd.get(s.route_id) <= to).map((s) => ({ ...s, date: rd.get(s.route_id) }));
+}
+function profitReport(db, from, to) {
+  const stops = doneStopsIn(db, from, to), exp = expenseSummary(db, from, to), chem = (exp.cats.find((c) => c.cat === 'Químicos') || {}).amount || 0;
+  const perVisit = stops.length ? chem / stops.length : 0, propClient = new Map(db.properties.map((p) => [p.id, p.client_id]));
+  const rows = db.clients.map((c) => {
+    const income = r2(db.invoices.filter((i) => i.client_id === c.id && i.status !== 'DRAFT' && i.issue_date >= from && i.issue_date <= to)
+      .reduce((s, i) => s + (i.lines || []).filter((x) => x.kind !== 'PREV' && x.kind !== 'CREDIT' && !/^Saldo anterior|^Pago adelantado/.test(x.description || '')).reduce((a, x) => a + (+x.amount || 0), 0), 0));
+    const vs = stops.filter((s) => propClient.get(s.property_id) === c.id);
+    const mins = vs.reduce((s, v) => { const d = v.check_in_time && v.check_out_time ? (new Date(v.check_out_time) - new Date(v.check_in_time)) / 60000 : 0; return s + (d > 0 && d < 360 ? d : 0); }, 0);
+    const cost = r2(vs.length * perVisit);
+    return { id: c.id, name: c.name, income, visits: vs.length, minutes: Math.round(mins), cost, profit: r2(income - cost), perHour: mins >= 5 ? r2(income / (mins / 60)) : null };
+  }).filter((r) => r.income > 0 || r.visits > 0).sort((a, b) => a.profit - b.profit);
+  return { rows, income: r2(rows.reduce((s, r) => s + r.income, 0)), chem: r2(chem), visits: stops.length, perVisit: r2(perVisit) };
+}
+function mileageReport(db, from, to, extraMi = 0, rate = 0) {
+  const KM = 0.621371, ROAD = 1.3, byDay = {};
+  doneStopsIn(db, from, to).forEach((s) => { (byDay[s.date] ||= []).push(s); });
+  const days = Object.keys(byDay).sort().map((date) => {
+    const pts = byDay[date].sort((a, b) => (a.order_index || 0) - (b.order_index || 0)).map((s) => db.properties.find((p) => p.id === s.property_id)).filter((p) => p && p.lat != null && p.lng != null && (p.lat || p.lng));
+    let km = 0; for (let i = 1; i < pts.length; i++) km += haversineKm(pts[i - 1], pts[i]) * ROAD;
+    const mi = km * KM + (+extraMi || 0);
+    return { date, stops: byDay[date].length, mi: r2(mi) };
+  });
+  const mi = r2(days.reduce((s, d) => s + d.mi, 0));
+  return { days, mi, km: r2(mi / KM), deduction: rate > 0 ? r2(mi * rate) : null };
+}
+function chemUsageReport(db, from, to) {
+  const rd = new Map(db.routes.map((r) => [r.id, r.date])), sd = new Map(db.stops.map((s) => [s.id, s])), out = {};
+  (db.dosages || []).forEach((d) => {
+    const s = sd.get(d.stop_id), date = s && rd.get(s.route_id); if (!date || date < from || date > to) return;
+    const wb = db.waterBodies.find((w) => w.id === d.water_body_id), p = wb && db.properties.find((x) => x.id === wb.property_id), c = p && db.clients.find((x) => x.id === p.client_id);
+    const key = wb ? wb.id : 'x', o = (out[key] ||= { label: `${c ? c.name : '—'}${wb && wb.name ? ' · ' + wb.name : ''}`, items: {} });
+    const k = `${d.chemical_name}|${d.unit || ''}`, it = (o.items[k] ||= { name: d.chemical_name, unit: d.unit || '', amount: 0 });
+    it.amount += +d.amount || 0;
+  });
+  return Object.values(out).map((o) => ({ label: o.label, items: Object.values(o.items).map((i) => ({ ...i, amount: r2(i.amount) })).sort((a, b) => b.amount - a.amount) })).sort((a, b) => a.label.localeCompare(b.label));
+}
+function buildStatementDoc(client, from, to, cfgIn, db) {
+  const cfg = cfgIn || mergeSettings(null), o = cfg.invoice, th = docTheme(cfg), today = todayISO();
+  const invs = db.invoices.filter((i) => i.client_id === client.id && i.status !== 'DRAFT' && !i.carried_to && ((i.issue_date >= from && i.issue_date <= to) || invBalance(i, db) > 0.005)).sort((a, b) => a.issue_date.localeCompare(b.issue_date));
+  const pays = (db.payments || []).filter((p) => p.client_id === client.id && p.date >= from && p.date <= to).sort((a, b) => a.date.localeCompare(b.date));
+  const visits = doneStopsIn(db, from, to).filter((s) => { const p = db.properties.find((x) => x.id === s.property_id); return p && p.client_id === client.id; }).length;
+  const owed = r2(invs.reduce((s, i) => s + invBalance(i, db), 0)), credit = clientCredit(db, client.id), paid = r2(pays.reduce((s, p) => s + p.amount, 0));
+  const L = [], prop = db.properties.find((p) => p.client_id === client.id);
+  const cinfo = [client.phone && `Tel. ${client.phone}`, client.email, prop && `${prop.address}, ${prop.municipality}`].filter(Boolean);
+  L.push({ cols2: [[{ t: 'CLIENTE', size: 8.5, b: true, c: GREY }, { t: client.name, size: 12, b: true }, ...cinfo.map((x) => ({ t: x, size: 9.5, c: GREY }))], [{ t: 'PERIODO', size: 8.5, b: true, c: GREY }, { t: `${fmtDate(from)} al ${fmtDate(to)}`, size: 11, b: true }, { t: `Visitas realizadas: ${visits}`, size: 9.5, c: GREY }, { t: `Pagos recibidos: ${money(paid)}`, size: 9.5, c: GREY }]], bg: th.soft, border: th.edge });
+  L.push({ panel: { rows: [{ t: owed > 0.005 ? 'BALANCE PENDIENTE' : 'AL DÍA — SIN BALANCE PENDIENTE', size: 9, b: true, c: GREY }, { t: money(owed), size: 26, b: true, c: owed > 0.005 ? th.acc : LC.ok }], bg: th.soft, border: th.edge } }, { space: 8 });
+  L.push({ t: 'FACTURAS', size: 8.5, b: true, c: GREY }, { space: 2 });
+  L.push({ size: 8.5, pad: 3, line: true, row: [{ t: 'Factura', w: 0.26, b: true, c: GREY }, { t: 'Fecha', w: 0.18, b: true, c: GREY }, { t: 'Total', w: 0.18, align: 'right', b: true, c: GREY }, { t: 'Pagado', w: 0.18, align: 'right', b: true, c: GREY }, { t: 'Balance', w: 0.2, align: 'right', b: true, c: GREY }] });
+  invs.forEach((i) => L.push({ size: 9.5, pad: 3, line: true, row: [{ t: invNumber(i, db), w: 0.26 }, { t: fmtDate(i.issue_date), w: 0.18 }, { t: money(i.total_amount), w: 0.18, align: 'right' }, { t: money(invPaid(i, db)), w: 0.18, align: 'right' }, { t: money(invBalance(i, db)), w: 0.2, align: 'right', b: true }] }));
+  if (!invs.length) L.push({ t: 'Sin facturas en este periodo.', size: 9.5, c: GREY });
+  L.push({ space: 8 }, { t: 'PAGOS RECIBIDOS', size: 8.5, b: true, c: GREY }, { space: 2 });
+  pays.forEach((p) => L.push({ size: 9.5, pad: 3, line: true, row: [{ t: fmtDate(p.date), w: 0.25 }, { t: PAY_METHODS[p.method] || p.method || '', w: 0.45 }, { t: money(p.amount), w: 0.3, align: 'right', b: true }] }));
+  if (!pays.length) L.push({ t: 'Sin pagos en este periodo.', size: 9.5, c: GREY });
+  if (credit > 0.005) L.push({ space: 6 }, { t: `Saldo a favor disponible: ${money(credit)}`, size: 10, b: true, c: th.acc });
+  const text = `📄 *${cfg.biz.name}* — Estado de cuenta\nHola ${client.name}, este es su resumen del ${fmtDate(from)} al ${fmtDate(to)}:\n• Visitas realizadas: ${visits}\n• Pagos recibidos: ${money(paid)}\n• Balance pendiente: *${money(owed)}*\n` + (owed > 0.005 ? '\nPuede pagar por ATH Móvil Business. ¡Gracias!' : '\n¡Está al día, gracias por su preferencia!');
+  return {
+    title: `Estado de cuenta — ${client.name}`, text, lines: L, fileName: `estado-de-cuenta-${client.name.replace(/\W+/g, '-')}-${from.slice(0, 7)}.pdf`,
+    opts: { header: pdfHeader(cfg, 'invoice', 'ESTADO DE CUENTA', [['Fecha', fmtDate(today)]]), footer: o.footer ? o.footerText : '', theme: th },
+  };
+}
+
 /* ---------- cotizaciones ---------- */
 const QUOTE_LABEL = { DRAFT: 'Borrador', SENT: 'Enviada', APPROVED: 'Aprobada', REJECTED: 'Rechazada', EXPIRED: 'Vencida' };
 const r2 = (n) => Math.round((+n || 0) * 100) / 100;
@@ -1512,4 +1600,4 @@ async function processPhoto(file, kind, coords) {
   return { uri: cv.toDataURL('image/jpeg', 0.72), w, h };
 }
 
-if (typeof module !== 'undefined') module.exports = { parseReceipt, classifyItem, itemSize, expenseSummary, parseMoney, QUOTE_TPLS, quoteScope, qrMatrix, buildReceiptDoc, TERMS, termsLabel, dueFor, PAY_METHODS, invPaid, invBalance, clientCredit, clientOwed, routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
+if (typeof module !== 'undefined') module.exports = { rowsFromBoxes, parseReceipt, classifyItem, itemSize, expenseSummary, parseMoney, QUOTE_TPLS, quoteScope, qrMatrix, buildReceiptDoc, TERMS, termsLabel, dueFor, PAY_METHODS, invPaid, invBalance, clientCredit, clientOwed, routeKm, SANITIZERS, PH_DOWN, CALCIUM_UP, CHEM_CATS, DEFAULT_CHEM, DEFAULT_TARGETS, chemPrefs, suggestDoses, propFee, propFeeLabel, buildQuoteDoc, quoteTotals, quoteStatus, nextQuoteNumber, feeLabel, athUrl, paymentInstructions, buildXlsx, backupSheets, buildPdf, suggestDoses, classify, buildInvoice, optimizeOrder, planDispatch, waLink, mergeSettings, buildStopDoc, buildInvoiceDoc, invNumber, tw, HW };
