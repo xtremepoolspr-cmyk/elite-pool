@@ -62,12 +62,60 @@ jobs:
               if (url && P.AppLauncher) { P.AppLauncher.openUrl({ url: String(url) }).catch(function () { open0(url, t, f); }); return null; }
               return open0(url, t, f);
             };
+
+            /* ---- Puente para avisos diarios y copia automática de archivos ---- */
+            window.EP_NATIVE = {
+              async askPermission() {
+                var L = P.LocalNotifications; if (!L) return 'denied';
+                var p = await L.checkPermissions();
+                if (p.display !== 'granted') p = await L.requestPermissions();
+                return p.display === 'granted' ? 'ok' : 'denied';
+              },
+              async cancelAll() {
+                var L = P.LocalNotifications; if (!L) return;
+                var pend = await L.getPending();
+                if (pend && pend.notifications && pend.notifications.length) await L.cancel({ notifications: pend.notifications.filter(function (n) { return n.id !== 999; }) });
+              },
+              async schedule(list) {
+                var L = P.LocalNotifications; if (!L) return 'denied';
+                if ((await this.askPermission()) !== 'ok') return 'denied';
+                await this.cancelAll();
+                if (!list.length) return 'ok';
+                await L.schedule({ notifications: list.map(function (x) {
+                  var first = String(x.body).split('\n')[0];
+                  return { id: x.id, title: x.title, body: first, largeBody: x.body, summaryText: 'Elite Pool Service PR', schedule: { at: new Date(x.at), allowWhileIdle: true } };
+                }) });
+                return 'ok';
+              },
+              async test(title, body) {
+                var L = P.LocalNotifications; if (!L) return 'denied';
+                if ((await this.askPermission()) !== 'ok') return 'denied';
+                await L.schedule({ notifications: [{ id: 999, title: title, body: String(body).split('\n')[0], largeBody: body, schedule: { at: new Date(Date.now() + 5000), allowWhileIdle: true } }] });
+                return 'ok';
+              },
+              async ocr(b64) {
+                var O = P.EpOcr; if (!O) throw new Error('sin lector nativo');
+                var r = await O.recognize({ base64: b64 });
+                return (r && r.lines) || [];
+              },
+              async saveFile(name, text) {
+                if (!P.Filesystem) return '';
+                var dirs = ['DOCUMENTS', 'EXTERNAL', 'DATA'];
+                for (var i = 0; i < dirs.length; i++) {
+                  try {
+                    await P.Filesystem.writeFile({ path: 'EliteBackups/' + name, data: text, directory: dirs[i], encoding: 'utf8', recursive: true });
+                    return dirs[i];
+                  } catch (e) { /* prueba la siguiente carpeta */ }
+                }
+                return '';
+              }
+            };
           })();
           SHIM_EOF
           sed -i 's#<script src="js/lib.js"></script>#<script src="js/lib.js"></script>\n  <script src="apk-shim.js"></script>#' www/index.html
           test "$(grep -c 'apk-shim.js' www/index.html)" = "1" || { echo "No pude enlazar el puente APK en index.html"; exit 1; }
           echo '{"name":"elite-pool-apk","version":"1.0.0","private":true}' > package.json
-          npm install --no-audit --no-fund @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 @capacitor/filesystem@6 @capacitor/share@6 @capacitor/app-launcher@6
+          npm install --no-audit --no-fund @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 @capacitor/filesystem@6 @capacitor/share@6 @capacitor/app-launcher@6 @capacitor/local-notifications@6
           echo '{"appId":"com.elitepoolservice.pr","appName":"Elite Pool PR","webDir":"www","server":{"androidScheme":"https"}}' > capacitor.config.json
           npx cap add android
           npx cap sync android
@@ -79,6 +127,10 @@ jobs:
           add = ('    <uses-permission android:name="android.permission.CAMERA" />\n'
                  '    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n'
                  '    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n'
+                 '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n'
+                 '    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />\n'
+                 '    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />\n'
+                 '    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />\n'
                  '    <uses-feature android:name="android.hardware.camera" android:required="false" />\n'
                  '    <uses-feature android:name="android.hardware.location.gps" android:required="false" />\n')
           assert '</manifest>' in s
@@ -103,8 +155,88 @@ jobs:
           fi
           keytool -list -keystore ~/.android/debug.keystore -storepass android > /dev/null || { echo "La clave apk-clave.keystore no es valida: vuelve a subir el archivo"; exit 1; }
           cd android
+          PKGDIR=$(dirname "$(find app/src/main/java -name MainActivity.java | head -n 1)")
+          PKG=$(grep -m1 '^package ' "$PKGDIR/MainActivity.java" | sed 's/package \(.*\);/\1/')
+          cat > "$PKGDIR/EpOcrPlugin.java" <<JAVA_EOF
+          package $PKG;
+
+          import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
+          import android.graphics.Rect;
+          import android.util.Base64;
+          import com.getcapacitor.JSArray;
+          import com.getcapacitor.JSObject;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+          import com.google.mlkit.vision.common.InputImage;
+          import com.google.mlkit.vision.text.Text;
+          import com.google.mlkit.vision.text.TextRecognition;
+          import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+
+          @CapacitorPlugin(name = "EpOcr")
+          public class EpOcrPlugin extends Plugin {
+            @PluginMethod
+            public void recognize(final PluginCall call) {
+              String b64 = call.getString("base64");
+              if (b64 == null) { call.reject("sin imagen"); return; }
+              try {
+                byte[] bytes = Base64.decode(b64, Base64.DEFAULT);
+                Bitmap bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                if (bmp == null) { call.reject("imagen invalida"); return; }
+                InputImage img = InputImage.fromBitmap(bmp, 0);
+                TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS).process(img)
+                  .addOnSuccessListener(t -> {
+                    JSArray arr = new JSArray();
+                    for (Text.TextBlock b : t.getTextBlocks()) {
+                      for (Text.Line l : b.getLines()) {
+                        Rect r = l.getBoundingBox();
+                        if (r == null) continue;
+                        JSObject o = new JSObject();
+                        o.put("text", l.getText());
+                        o.put("left", r.left);
+                        o.put("top", r.top);
+                        o.put("right", r.right);
+                        o.put("bottom", r.bottom);
+                        arr.put(o);
+                      }
+                    }
+                    JSObject res = new JSObject();
+                    res.put("lines", arr);
+                    call.resolve(res);
+                  })
+                  .addOnFailureListener(e -> call.reject(String.valueOf(e.getMessage())));
+              } catch (Exception e) {
+                call.reject(String.valueOf(e.getMessage()));
+              }
+            }
+          }
+          JAVA_EOF
+          cat > "$PKGDIR/MainActivity.java" <<JAVA_EOF
+          package $PKG;
+
+          import android.os.Bundle;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+            @Override
+            public void onCreate(Bundle savedInstanceState) {
+              registerPlugin(EpOcrPlugin.class);
+              super.onCreate(savedInstanceState);
+            }
+          }
+          JAVA_EOF
+          sed -i '0,/^dependencies {/s//dependencies {\n    implementation "com.google.mlkit:text-recognition:16.0.0"/' app/build.gradle
+          grep -q "mlkit:text-recognition" app/build.gradle || echo "AVISO: no pude agregar el lector de Android"
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleDebug --no-daemon || {
+            echo "AVISO: fallo con el lector de Android; reconstruyendo sin el lector nativo"
+            rm -f "$PKGDIR/EpOcrPlugin.java"
+            sed -i '/mlkit:text-recognition/d' app/build.gradle
+            sed -i '/registerPlugin(EpOcrPlugin.class);/d' "$PKGDIR/MainActivity.java"
+            ./gradlew assembleDebug --no-daemon
+          }
 
       - uses: actions/upload-artifact@v4
         with:
